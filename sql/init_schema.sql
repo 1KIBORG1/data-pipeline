@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS apartments (
+    id VARCHAR(32) PRIMARY KEY,
+    url TEXT NOT NULL,
+    title TEXT,
+    transaction_type VARCHAR(32),
+    category_sub VARCHAR(64),
+    rooms_count SMALLINT,
+    price_eur INTEGER,
+    price_per_sqm_eur NUMERIC(10, 2),
+    area_sqm NUMERIC(8, 2),
+    floor SMALLINT,
+    total_floors SMALLINT,
+    property_condition VARCHAR(64),
+    has_elevator BOOLEAN NOT NULL DEFAULT FALSE,
+    has_balcony BOOLEAN NOT NULL DEFAULT FALSE,
+    city VARCHAR(128),
+    district VARCHAR(128),
+    updated_at TIMESTAMPTZ,
+    scraped_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
