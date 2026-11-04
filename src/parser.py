@@ -2,8 +2,6 @@ import requests
 import json
 from typing import Any
 from parsel import Selector
-from urllib import response
-
 
 def extract_links(url='https://www.nehnutelnosti.sk/sitemap/sitemap-listings-byty-sk.xml'):
     response = requests.get(url)
@@ -105,8 +103,3 @@ def parse_apartment_html(html: str, url: str = "") -> dict[str, Any] | None:
         "district": loc.get("district"),
         "updated_at": ad.get("updatedAt"),
     }
-
-# test = parse_apartment_html(requests.get('https://www.nehnutelnosti.sk/detail/JuHb6NaDYqX/priestranny-3-izbovy-byt-po-kompletnej-rekonstrukcii-v-starom-meste').text)
-#
-# for key, value in test.items():
-#     print(f'{key}: {value}')
