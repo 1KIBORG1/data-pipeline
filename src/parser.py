@@ -3,7 +3,8 @@ import json
 from typing import Any
 from parsel import Selector
 
-def extract_links(url='https://www.nehnutelnosti.sk/sitemap/sitemap-listings-byty-sk.xml'):
+
+def extract_links(url):
     response = requests.get(url)
     sel = Selector(text=response.text, type="xml")
     links = sel.xpath('//*[local-name()="url"]/*[local-name()="loc"]/text()').getall()
@@ -12,7 +13,8 @@ def extract_links(url='https://www.nehnutelnosti.sk/sitemap/sitemap-listings-byt
     else:
         raise 'Ошибка'
 
-def extract_card_preview(html):
+
+def extract_card_preview(html: str) -> dict[str, str | None]:
     sel = Selector(text=html)
     result = dict()
     result['title'] = sel.xpath('//h2/text()').get()
@@ -20,13 +22,15 @@ def extract_card_preview(html):
     result['price'] = sel.xpath('//span[@class="price"]/text()').get()
     return result
 
-def find_ad_script(html):
+
+def find_ad_script(html: str) -> str | None:
     sel = Selector(text=html)
     ad_script = sel.xpath(
         """//script[contains(text(), 'self.__next_f.push(') and contains(text(), '\\"advertisement\\":{\\"id\\"')]/text()""").get()
     return ad_script.strip() if ad_script else None
 
-def extract_ad_dict(html):
+
+def extract_ad_dict(html: str) -> dict[str, Any] | None:
     text = find_ad_script(html)
     if text is None:
         return None
@@ -43,6 +47,7 @@ def extract_ad_dict(html):
     except (json.JSONDecodeError, IndexError, ValueError, TypeError, StopIteration):
         return None
 
+
 def build_attrs_map(attrs_list: list[dict[str, Any]] | None) -> dict[str, str]:
     result = {}
 
@@ -56,6 +61,7 @@ def build_attrs_map(attrs_list: list[dict[str, Any]] | None) -> dict[str, str]:
         result[str(label).strip()] = str(value).strip()
 
     return result
+
 
 def parse_apartment_html(html: str, url: str = "") -> dict[str, Any] | None:
     ad = extract_ad_dict(html)
@@ -75,8 +81,8 @@ def parse_apartment_html(html: str, url: str = "") -> dict[str, Any] | None:
     has_elevator = bool(params.get("hasElevator")) or ("Výťah" in vybavenie)
     balcony_cnt = attrs.get("Počet balkónov") or attrs.get("Počet loggií")
     has_balcony = (
-        any(w in vybavenie for w in ("Balkón", "Loggia", "Terasa"))
-        or (balcony_cnt is not None and balcony_cnt not in ("0", "Nie", "nie"))
+            any(w in vybavenie for w in ("Balkón", "Loggia", "Terasa"))
+            or (balcony_cnt is not None and balcony_cnt not in ("0", "Nie", "nie"))
     )
     floor_raw = params.get("floor")
     if floor_raw is None:
