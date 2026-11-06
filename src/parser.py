@@ -1,26 +1,6 @@
-import requests
 import json
 from typing import Any
 from parsel import Selector
-
-
-def extract_links(url):
-    response = requests.get(url)
-    sel = Selector(text=response.text, type="xml")
-    links = sel.xpath('//*[local-name()="url"]/*[local-name()="loc"]/text()').getall()
-    if links:
-        return links
-    else:
-        raise 'Ошибка'
-
-
-def extract_card_preview(html: str) -> dict[str, str | None]:
-    sel = Selector(text=html)
-    result = dict()
-    result['title'] = sel.xpath('//h2/text()').get()
-    result['url'] = sel.xpath('//a/@href').get()
-    result['price'] = sel.xpath('//span[@class="price"]/text()').get()
-    return result
 
 
 def find_ad_script(html: str) -> str | None:
