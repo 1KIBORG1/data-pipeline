@@ -10,17 +10,21 @@ MAX_FLOOR = 46
 
 ROOMS_BY_SUBCATEGORY: dict[str, int] = {
     "GARSONKA": 1,
+    "STUDIO_APARTMENT": 1,
     "DOUBLE_GARSONKA": 2,
+    "DOUBLE_STUDIO_APARTMENT": 2,
     "ONE_ROOM_APARTMENT": 1,
     "TWO_ROOM_APARTMENT": 2,
     "THREE_ROOM_APARTMENT": 3,
     "FOUR_ROOM_APARTMENT": 4,
     "FIVE_AND_MORE_ROOM_APARTMENT": 5,
+    "FIVE_PLUS_ROOM_APARTMENT": 5
 }
 
 REJECT_TITLE_STEMS = (
     "rezervovan",
     "predan",
+    "prenajat",
     "kupim",
     "hladam",
     "dopyt",
@@ -168,7 +172,6 @@ class ApartmentModel(BaseModel):
 
     @model_validator(mode="after")
     def validate_apartment_consistency(self) -> "ApartmentModel":
-        # Ignore unavailable, reserved, sold, and wanted-ad listings.
         if self.title:
             title = _remove_diacritics(self.title).casefold()
             rejected_word = next(
@@ -180,12 +183,21 @@ class ApartmentModel(BaseModel):
                     f"Apartment title contains a rejected stem: {rejected_word}"
                 )
 
+        if not self.has_balcony and self.title:
+            title_clean = _remove_diacritics(self.title).casefold()
+            if not any(neg in title_clean for neg in ("bez balkon", "bez loggi", "bez lodzi")):
+                if any(
+                        kw in title_clean
+                        for kw in ("balkon", "loggi", "lodzi", "terasou", "+ terasa", "a terasa")
+                ):
+                    self.has_balcony = True
+
         if self.rooms_count is not None and not (1 <= self.rooms_count <= 20):
             self.rooms_count = None
 
         expected_rooms = ROOMS_BY_SUBCATEGORY.get(self.category_sub or "")
         if expected_rooms is not None:
-            if self.category_sub == "FIVE_AND_MORE_ROOM_APARTMENT":
+            if self.category_sub in ("FIVE_AND_MORE_ROOM_APARTMENT", "FIVE_PLUS_ROOM_APARTMENT"):
                 if self.rooms_count is None or self.rooms_count < 5:
                     self.rooms_count = 5
             else:
@@ -207,11 +219,21 @@ class ApartmentModel(BaseModel):
                 self.price_per_sqm_eur = round(self.price_eur / self.area_sqm, 2)
 
         if self.total_floors is not None and (
-                self.total_floors < 1
+                self.total_floors <= 1
                 or (self.floor is not None and self.floor > self.total_floors)
                 or (self.has_elevator and self.total_floors == 1)
         ):
             self.total_floors = None
 
+        if self.rooms_count is None and self.title:
+            title_clean = _remove_diacritics(self.title).casefold()
+            match_rooms = re.search(
+                r"\b([1-9])(?:[.,]\d+)?\s*(?:-\s*)?(?:izb|i\b)",
+                title_clean,
+            )
+            if match_rooms:
+                self.rooms_count = int(match_rooms.group(1))
+            elif any(w in title_clean for w in ("garson", "studiov", "1kk")):
+                self.rooms_count = 1
+
         return self
-    
