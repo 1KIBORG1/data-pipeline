@@ -22,7 +22,6 @@ class ApartmentSitemapSpider(SitemapSpider):
 
     sitemap_urls = [
         "https://www.nehnutelnosti.sk/sitemap-listings-byty-predaj-slovensko.xml",
-        "https://www.nehnutelnosti.sk/sitemap-listings-byty-prenajom-slovensko.xml",
     ]
     sitemap_rules = [
         (r"/detail/", "parse_apartment"),
