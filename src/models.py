@@ -18,7 +18,7 @@ ROOMS_BY_SUBCATEGORY: dict[str, int] = {
     "THREE_ROOM_APARTMENT": 3,
     "FOUR_ROOM_APARTMENT": 4,
     "FIVE_AND_MORE_ROOM_APARTMENT": 5,
-    "FIVE_PLUS_ROOM_APARTMENT": 5
+    "FIVE_PLUS_ROOM_APARTMENT": 5,
 }
 
 REJECT_TITLE_STEMS = (
@@ -28,7 +28,39 @@ REJECT_TITLE_STEMS = (
     "kupim",
     "hladam",
     "dopyt",
+    "samostatna izba",
+    "samostatne izby",
+    "spolubyvani",
+    "odstupeni",
 )
+
+WORD_ROOMS_MAP: tuple[tuple[str, int], ...] = (
+    ("jednoizb", 1),
+    ("dvojizb", 2),
+    ("trojizb", 3),
+    ("stvorizb", 4),
+    ("patizb", 5),
+    ("sestizb", 6),
+    ("sedemizb", 7),
+    ("2garson", 2),
+    ("dvojgarson", 2),
+    ("garson", 1),
+    ("studiov", 1),
+    ("1kk", 1),
+)
+
+
+def extract_rooms_from_title(title_clean: str) -> int | None:
+    match_rooms = re.search(
+        r"\b([1-9])(?:[.,]\d+)?(?:\s*(?:[-–]\s*)?izb|\s*[-–]\s*i\b|i\b)",
+        title_clean,
+    )
+    if match_rooms:
+        return int(match_rooms.group(1))
+    for stem, count in WORD_ROOMS_MAP:
+        if stem in title_clean:
+            return count
+    return None
 
 
 def parse_positive_float(value: Any) -> float | None:
@@ -172,10 +204,11 @@ class ApartmentModel(BaseModel):
 
     @model_validator(mode="after")
     def validate_apartment_consistency(self) -> "ApartmentModel":
-        if self.title:
-            title = _remove_diacritics(self.title).casefold()
+        title_clean = _remove_diacritics(self.title).casefold() if self.title else ""
+
+        if title_clean:
             rejected_word = next(
-                (stem for stem in REJECT_TITLE_STEMS if stem in title),
+                (stem for stem in REJECT_TITLE_STEMS if stem in title_clean),
                 None,
             )
             if rejected_word is not None:
@@ -183,57 +216,71 @@ class ApartmentModel(BaseModel):
                     f"Apartment title contains a rejected stem: {rejected_word}"
                 )
 
-        if not self.has_balcony and self.title:
-            title_clean = _remove_diacritics(self.title).casefold()
+        if not self.has_balcony and title_clean:
             if not any(neg in title_clean for neg in ("bez balkon", "bez loggi", "bez lodzi")):
                 if any(
-                        kw in title_clean
-                        for kw in ("balkon", "loggi", "lodzi", "terasou", "+ terasa", "a terasa")
+                    kw in title_clean
+                    for kw in ("balkon", "loggi", "lodzi", "terasou", "+ terasa", "a terasa")
                 ):
                     self.has_balcony = True
 
-        if self.rooms_count is not None and not (1 <= self.rooms_count <= 20):
-            self.rooms_count = None
+        raw_rooms = (
+            self.rooms_count
+            if (self.rooms_count is not None and 1 <= self.rooms_count <= 10)
+            else None
+        )
+        sub_rooms = ROOMS_BY_SUBCATEGORY.get(self.category_sub or "")
+        title_rooms = extract_rooms_from_title(title_clean) if title_clean else None
 
-        expected_rooms = ROOMS_BY_SUBCATEGORY.get(self.category_sub or "")
-        if expected_rooms is not None:
+        if title_rooms is not None:
+            self.rooms_count = title_rooms
+        elif sub_rooms is not None:
             if self.category_sub in ("FIVE_AND_MORE_ROOM_APARTMENT", "FIVE_PLUS_ROOM_APARTMENT"):
-                if self.rooms_count is None or self.rooms_count < 5:
-                    self.rooms_count = 5
+                self.rooms_count = raw_rooms if (raw_rooms is not None and raw_rooms >= 5) else 5
             else:
-                self.rooms_count = expected_rooms
+                self.rooms_count = sub_rooms
+        else:
+            self.rooms_count = raw_rooms
 
         if self.area_sqm is not None and not (10.0 <= self.area_sqm <= 600.0):
             self.area_sqm = None
             self.price_per_sqm_eur = None
 
-        if self.price_eur is not None and self.price_eur < 100:
-            self.price_eur = None
+        if self.price_eur is not None:
+            if self.transaction_type == "prenajom":
+                if not (150 <= self.price_eur <= 10_000):
+                    self.price_eur = None
+                    self.price_per_sqm_eur = None
+            else:
+                if not (15_000 <= self.price_eur <= 5_000_000):
+                    self.price_eur = None
+                    self.price_per_sqm_eur = None
+
+        if self.price_eur is not None and self.area_sqm is not None and self.area_sqm > 0:
+            pps = round(self.price_eur / self.area_sqm, 2)
+            if self.transaction_type == "prenajom":
+                if 3.0 <= pps <= 60.0:
+                    self.price_per_sqm_eur = pps
+                else:
+                    self.price_eur = None
+                    self.price_per_sqm_eur = None
+            else:
+                if 300.0 <= pps <= 25_000.0:
+                    self.price_per_sqm_eur = pps
+                else:
+                    self.price_eur = None
+                    self.price_per_sqm_eur = None
+        else:
             self.price_per_sqm_eur = None
 
         if self.city and self.city.casefold() == "slovensko":
             self.city = None
 
-        if self.price_eur is not None and self.area_sqm is not None and self.area_sqm > 0:
-            if self.price_eur > 0:
-                self.price_per_sqm_eur = round(self.price_eur / self.area_sqm, 2)
-
         if self.total_floors is not None and (
-                self.total_floors <= 1
-                or (self.floor is not None and self.floor > self.total_floors)
-                or (self.has_elevator and self.total_floors == 1)
+            self.total_floors <= 1
+            or (self.floor is not None and self.floor > self.total_floors)
+            or (self.has_elevator and self.total_floors == 1)
         ):
             self.total_floors = None
-
-        if self.rooms_count is None and self.title:
-            title_clean = _remove_diacritics(self.title).casefold()
-            match_rooms = re.search(
-                r"\b([1-9])(?:[.,]\d+)?\s*(?:-\s*)?(?:izb|i\b)",
-                title_clean,
-            )
-            if match_rooms:
-                self.rooms_count = int(match_rooms.group(1))
-            elif any(w in title_clean for w in ("garson", "studiov", "1kk")):
-                self.rooms_count = 1
 
         return self
