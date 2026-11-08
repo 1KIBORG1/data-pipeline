@@ -261,7 +261,7 @@ class ApartmentModel(BaseModel):
     @classmethod
     def clean_optional_text(cls, value: Any) -> Any:
         if isinstance(value, str):
-            return value.strip() or None
+            return re.sub(r"\s+", " ", value).strip() or None
         return value
 
     @model_validator(mode="after")
