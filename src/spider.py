@@ -1,6 +1,7 @@
 """Scrapy SitemapSpider for incremental scraping of Slovak apartment sales."""
 
 import argparse
+import logging
 from datetime import datetime
 from typing import Any, Iterator
 
@@ -50,6 +51,17 @@ SPEED_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
+# Internal Scrapy loggers that dump verbose startup/shutdown dictionaries at INFO level
+NOISY_SCRAPY_LOGGERS = (
+    "scrapy.addons",
+    "scrapy.crawler",
+    "scrapy.core.engine",
+    "scrapy.extensions",
+    "scrapy.middleware",
+    "scrapy.statscollectors",
+    "scrapy.utils.log",
+)
+
 
 class ApartmentSitemapSpider(SitemapSpider):
     """Crawl apartment sale listings from Nehnutelnosti.sk XML sitemaps incrementally."""
@@ -76,6 +88,11 @@ class ApartmentSitemapSpider(SitemapSpider):
         },
         "ROBOTSTXT_OBEY": False,
         "COOKIES_ENABLED": False,
+        "TELNETCONSOLE_ENABLED": False,
+        "LOGSTATS_INTERVAL": 0,
+        "LOG_FORMAT": "%(asctime)s | %(levelname)-7s | %(message)s",
+        "LOG_DATEFORMAT": "%Y-%m-%d %H:%M:%S",
+        "LOG_FORMATTER": "src.pipelines.CleanLogFormatter",
         "RESPONSE_MAX_ACTIVE_SIZE": 0,
         "DOWNLOAD_TIMEOUT": 90,
         "RETRY_ENABLED": True,
@@ -91,12 +108,15 @@ class ApartmentSitemapSpider(SitemapSpider):
         self.limit = int(limit) if limit is not None else None
         # Populated by PostgresPipeline.open_spider() before sitemap parsing begins
         self.existing_timestamps: dict[str, datetime | None] = {}
-        self._queued_count = 0
+        self.queued_count = 0
+        self.unchanged_count = 0
+        self.crawled_count = 0
+        self.crawl_start_time: float | None = None
 
     def sitemap_filter(self, entries: Iterator[dict[str, Any]]) -> Iterator[dict[str, Any]]:
         """Yield only new or modified sitemap entries based on `<lastmod>` vs DB `updated_at`."""
         for entry in entries:
-            if self.limit is not None and self._queued_count >= self.limit:
+            if self.limit is not None and self.queued_count >= self.limit:
                 break
 
             loc = entry.get("loc", "")
@@ -110,15 +130,24 @@ class ApartmentSitemapSpider(SitemapSpider):
                     try:
                         sitemap_dt = datetime.fromisoformat(lastmod_raw)
                         if int(sitemap_dt.timestamp()) <= int(db_dt.timestamp()):
+                            self.unchanged_count += 1
                             continue
                     except ValueError:
                         pass
 
-            self._queued_count += 1
+            self.queued_count += 1
             yield entry
+
+        self.crawl_start_time = datetime.now().timestamp()
+        self.logger.info(
+            "Sitemap filtered: %d new/updated URLs queued (%d unchanged skipped)",
+            self.queued_count,
+            self.unchanged_count,
+        )
 
     def parse_apartment(self, response: Response) -> list[dict[str, Any]]:
         """Extract raw apartment dictionary from detail page HTML."""
+        self.crawled_count += 1
         data = parse_apartment_html(response.text, url=response.url)
         return [data] if data is not None else []
 
@@ -128,6 +157,11 @@ def build_scrapy_settings(speed: str, workers: int | None, log_level: str) -> di
     settings: dict[str, Any] = {
         **SPEED_PROFILES[speed],
         "LOG_LEVEL": log_level,
+        "LOG_FORMAT": "%(asctime)s | %(levelname)-7s | %(message)s",
+        "LOG_DATEFORMAT": "%Y-%m-%d %H:%M:%S",
+        "LOG_FORMATTER": "src.pipelines.CleanLogFormatter",
+        "TELNETCONSOLE_ENABLED": False,
+        "LOGSTATS_INTERVAL": 0,
     }
     if workers is not None and workers > 0:
         settings["CONCURRENT_REQUESTS"] = workers
@@ -135,6 +169,13 @@ def build_scrapy_settings(speed: str, workers: int | None, log_level: str) -> di
         if settings.get("AUTOTHROTTLE_ENABLED"):
             settings["AUTOTHROTTLE_TARGET_CONCURRENCY"] = float(workers)
     return settings
+
+
+def silence_noisy_loggers(log_level: str) -> None:
+    """Suppress Scrapy's verbose startup and shutdown dictionary dumps unless DEBUG is enabled."""
+    if log_level != "DEBUG":
+        for name in NOISY_SCRAPY_LOGGERS:
+            logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def parse_args() -> argparse.Namespace:
@@ -185,6 +226,13 @@ if __name__ == "__main__":
         workers=args.workers,
         log_level=args.log_level,
     )
+    silence_noisy_loggers(args.log_level)
     process = CrawlerProcess(settings=scrapy_settings)
+    logging.getLogger(ApartmentSitemapSpider.name).info(
+        "Starting spider (speed=%s, workers=%d, limit=%s)",
+        args.speed,
+        scrapy_settings["CONCURRENT_REQUESTS"],
+        args.limit,
+    )
     process.crawl(ApartmentSitemapSpider, limit=args.limit)
     process.start()
