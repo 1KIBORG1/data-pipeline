@@ -64,12 +64,19 @@ class NetworkResilientRetryMiddleware(RetryMiddleware):
         super().__init__(settings)
         self._consecutive_errors = 0
         self._paused = False
+        self._pause_epoch = 0
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
         mw = cls(crawler.settings)
         mw.crawler = crawler
         return mw
+
+    def process_request(self, request: Request) -> None:
+        """Stamp each request with the current pause epoch and set page timeout."""
+        request.meta["_sent_epoch"] = self._pause_epoch
+        if "/detail/" in request.url:
+            request.meta.setdefault("download_timeout", 20)
 
     def process_response(
         self,
@@ -86,34 +93,38 @@ class NetworkResilientRetryMiddleware(RetryMiddleware):
         exception: Exception,
     ) -> Request | Response | None:
         if isinstance(exception, self.exceptions_to_retry):
+            req_epoch = request.meta.get("_sent_epoch", self._pause_epoch)
+
+            # Requests sent before the most recent pause belong to an older batch;
+            # re-queue them without counting toward a new pause after resume.
+            if self._paused or req_epoch < self._pause_epoch:
+                retry_req = request.copy()
+                retry_req.dont_filter = True
+                return retry_req
+
             self._consecutive_errors += 1
             active_spider = self.crawler.spider if self.crawler else None
             is_sitemap_phase = getattr(active_spider, "queued_count", 0) == 0
 
-            if (
-                self._paused
-                or self._consecutive_errors >= self.OUTAGE_THRESHOLD
-                or is_sitemap_phase
-            ):
-                if not self._paused:
-                    self._paused = True
-                    if self.crawler and self.crawler.engine:
-                        self.crawler.engine.pause()
-                    log = (
-                        active_spider.logger
-                        if active_spider is not None
-                        else logging.getLogger(ApartmentSitemapSpider.name)
-                    )
-                    log.warning(
-                        "Network timeout/error (%s). Pausing spider for %.0fs cooldown...",
-                        exception.__class__.__name__,
-                        self.COOLDOWN_SEC,
-                    )
-                    from twisted.internet import reactor
+            if self._consecutive_errors >= self.OUTAGE_THRESHOLD or is_sitemap_phase:
+                self._paused = True
+                self._pause_epoch += 1
+                if self.crawler and self.crawler.engine:
+                    self.crawler.engine.pause()
+                log = (
+                    active_spider.logger
+                    if active_spider is not None
+                    else logging.getLogger(ApartmentSitemapSpider.name)
+                )
+                log.warning(
+                    "Network timeout/error (%s). Pausing spider for %.0fs cooldown...",
+                    exception.__class__.__name__,
+                    self.COOLDOWN_SEC,
+                )
+                from twisted.internet import reactor
 
-                    reactor.callLater(self.COOLDOWN_SEC, self._resume_crawl)
+                reactor.callLater(self.COOLDOWN_SEC, self._resume_crawl)
 
-                # Re-queue request without burning its retry counter while paused
                 retry_req = request.copy()
                 retry_req.dont_filter = True
                 return retry_req
@@ -124,6 +135,12 @@ class NetworkResilientRetryMiddleware(RetryMiddleware):
         """Unpause the Scrapy engine after the cooldown period expires."""
         self._consecutive_errors = 0
         self._paused = False
+        try:
+            from scrapy.resolver import dnscache
+
+            dnscache._cache.clear()
+        except Exception:
+            pass
         active_spider = self.crawler.spider if self.crawler else None
         log = (
             active_spider.logger
