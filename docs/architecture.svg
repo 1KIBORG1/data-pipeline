@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 310" width="100%" height="auto" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <style>
+      .bg { fill: #0d1117; rx: 12px; }
+      .card { fill: #161b22; stroke: #30363d; stroke-width: 1.5; rx: 8px; }
+      .card-accent-1 { stroke: #58a6ff; }
+      .card-accent-2 { stroke: #3fb950; }
+      .card-accent-3 { stroke: #d29922; }
+      .card-accent-4 { stroke: #a371f7; }
+      .step-badge { font-size: 11px; font-weight: 700; letter-spacing: 0.6px; }
+      .title { fill: #f0f6fc; font-size: 14px; font-weight: 600; }
+      .module { fill: #8b949e; font-size: 11.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      .desc { fill: #c9d1d9; font-size: 11.5px; }
+      .code-pill { fill: #21262d; stroke: #30363d; stroke-width: 1; rx: 4px; }
+      .code-text { fill: #79c0ff; font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      .arrow { stroke: #8b949e; stroke-width: 1.8; fill: none; }
+      .arrow-feedback { stroke: #58a6ff; stroke-width: 1.5; stroke-dasharray: 5,4; fill: none; }
+      .feedback-label { fill: #58a6ff; font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#8b949e"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#58a6ff"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect class="bg" width="980" height="310"/>
+
+  <!-- Header -->
+  <text x="28" y="34" fill="#f0f6fc" font-size="15" font-weight="600">Nehnutelnosti.sk ETL Pipeline Architecture</text>
+  <text x="952" y="34" fill="#8b949e" font-size="12" text-anchor="end">Scrapy 2.19 • Parsel • Pydantic v2 • PostgreSQL 17</text>
+  <line x1="28" y1="46" x2="952" y2="46" stroke="#21262d" stroke-width="1"/>
+
+  <!-- STAGE 1: SitemapSpider -->
+  <rect class="card card-accent-1" x="28" y="66" width="205" height="176"/>
+  <text class="step-badge" x="44" y="90" fill="#58a6ff">1. EXTRACT &amp; FILTER</text>
+  <text class="title" x="44" y="110">SitemapSpider</text>
+  <text class="module" x="44" y="127">src/spider.py</text>
+  <line x1="44" y1="138" x2="217" y2="138" stroke="#21262d"/>
+  <text class="desc" x="44" y="158">• Streams XML sitemap</text>
+  <text class="desc" x="44" y="176">• Compares &lt;lastmod&gt; vs DB</text>
+  <text class="desc" x="44" y="194">• Skips unchanged ads</text>
+  <rect class="code-pill" x="44" y="208" width="173" height="22"/>
+  <text class="code-text" x="130.5" y="223" text-anchor="middle">sitemap_filter()</text>
+
+  <!-- Arrow 1 -> 2 -->
+  <line class="arrow" x1="233" y1="154" x2="263" y2="154" marker-end="url(#arrow)"/>
+
+  <!-- STAGE 2: RSC Parser -->
+  <rect class="card card-accent-2" x="267" y="66" width="205" height="176"/>
+  <text class="step-badge" x="283" y="90" fill="#3fb950">2. PARSE RSC PAYLOAD</text>
+  <text class="title" x="283" y="110">Next.js Flight Parser</text>
+  <text class="module" x="283" y="127">src/parser.py</text>
+  <line x1="283" y1="138" x2="456" y2="138" stroke="#21262d"/>
+  <text class="desc" x="283" y="158">• XPath locates script chunk</text>
+  <text class="desc" x="283" y="176">• 2-layer JSON decoding</text>
+  <text class="desc" x="283" y="194">• Flattens attributes array</text>
+  <rect class="code-pill" x="283" y="208" width="173" height="22"/>
+  <text class="code-text" x="369.5" y="223" text-anchor="middle">self.__next_f.push()</text>
+
+  <!-- Arrow 2 -> 3 -->
+  <line class="arrow" x1="472" y1="154" x2="502" y2="154" marker-end="url(#arrow)"/>
+
+  <!-- STAGE 3: Pydantic Model -->
+  <rect class="card card-accent-3" x="506" y="66" width="205" height="176"/>
+  <text class="step-badge" x="522" y="90" fill="#d29922">3. VALIDATE &amp; CLEAN</text>
+  <text class="title" x="522" y="110">Pydantic v2 Model</text>
+  <text class="module" x="522" y="127">src/models.py</text>
+  <line x1="522" y1="138" x2="695" y2="138" stroke="#21262d"/>
+  <text class="desc" x="522" y="158">• Drops reserved/wanted ads</text>
+  <text class="desc" x="522" y="176">• Resolves room count</text>
+  <text class="desc" x="522" y="194">• Enforces market bounds</text>
+  <rect class="code-pill" x="522" y="208" width="173" height="22"/>
+  <text class="code-text" x="608.5" y="223" text-anchor="middle">ApartmentModel</text>
+
+  <!-- Arrow 3 -> 4 -->
+  <line class="arrow" x1="711" y1="154" x2="741" y2="154" marker-end="url(#arrow)"/>
+
+  <!-- STAGE 4: PostgresPipeline & DB -->
+  <rect class="card card-accent-4" x="745" y="66" width="207" height="176"/>
+  <text class="step-badge" x="761" y="90" fill="#a371f7">4. PERSIST (UPSERT)</text>
+  <text class="title" x="761" y="110">PostgreSQL 17</text>
+  <text class="module" x="761" y="127">src/pipelines.py • db.py</text>
+  <line x1="761" y1="138" x2="936" y2="138" stroke="#21262d"/>
+  <text class="desc" x="761" y="158">• ACID transaction per item</text>
+  <text class="desc" x="761" y="176">• Idempotent upsert on PK</text>
+  <text class="desc" x="761" y="194">• Updates scraped_at</text>
+  <rect class="code-pill" x="761" y="208" width="175" height="22"/>
+  <text class="code-text" x="848.5" y="223" text-anchor="middle">ON CONFLICT (id) DO UPDATE</text>
+
+  <!-- Feedback Loop: Preload existing timestamps -->
+  <path class="arrow-feedback" d="M 848 242 L 848 278 L 130 278 L 130 246" marker-end="url(#arrow-blue)"/>
+  <rect x="330" y="266" width="320" height="22" fill="#0d1117"/>
+  <text class="feedback-label" x="490" y="281" text-anchor="middle">open_spider(): preload {id: updated_at} cache</text>
+</svg>

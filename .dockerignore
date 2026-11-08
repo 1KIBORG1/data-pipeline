@@ -8,4 +8,5 @@ __pycache__/
 .env
 .scrapy/
 tests/
+docs/
 *.log
