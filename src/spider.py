@@ -2,7 +2,6 @@
 
 import argparse
 import logging
-import socket
 import sys
 from datetime import datetime
 from typing import Any, Iterator, Self
@@ -55,28 +54,14 @@ SPEED_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 
-def _is_host_reachable(
-    host: str = "www.nehnutelnosti.sk",
-    port: int = 443,
-    timeout: float = 5.0,
-) -> bool:
-    """Check TCP connectivity to the target host from a background thread."""
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
 class NetworkResilientRetryMiddleware(RetryMiddleware):
-    """Pause the Scrapy engine during internet outages so queued URLs are not lost."""
+    """Pause the Scrapy engine for a cooldown window on network/timeout errors."""
 
     OUTAGE_THRESHOLD = 3
-    CHECK_INTERVAL_SEC = 20.0
+    COOLDOWN_SEC = 30.0
 
     def __init__(self, settings: Any) -> None:
         super().__init__(settings)
-        self.crawler: Crawler | None = None
         self._consecutive_errors = 0
         self._paused = False
 
@@ -90,21 +75,19 @@ class NetworkResilientRetryMiddleware(RetryMiddleware):
         self,
         request: Request,
         response: Response,
-        spider: Any = None,
     ) -> Request | Response:
         if response.status < 500 and response.status not in self.retry_http_codes:
             self._consecutive_errors = 0
-        return super().process_response(request, response, spider)
+        return super().process_response(request, response)
 
     def process_exception(
         self,
         request: Request,
         exception: Exception,
-        spider: Any = None,
     ) -> Request | Response | None:
         if isinstance(exception, self.exceptions_to_retry):
             self._consecutive_errors += 1
-            active_spider = spider or (self.crawler.spider if self.crawler else None)
+            active_spider = self.crawler.spider if self.crawler else None
             is_sitemap_phase = getattr(active_spider, "queued_count", 0) == 0
 
             if (
@@ -122,42 +105,37 @@ class NetworkResilientRetryMiddleware(RetryMiddleware):
                         else logging.getLogger(ApartmentSitemapSpider.name)
                     )
                     log.warning(
-                        "Network outage detected (%s). Pausing spider and waiting for connection...",
+                        "Network timeout/error (%s). Pausing spider for %.0fs cooldown...",
                         exception.__class__.__name__,
+                        self.COOLDOWN_SEC,
                     )
-                    self._schedule_recovery_check()
+                    from twisted.internet import reactor
 
-                # Re-queue request without burning its retry counter while offline
+                    reactor.callLater(self.COOLDOWN_SEC, self._resume_crawl)
+
+                # Re-queue request without burning its retry counter while paused
                 retry_req = request.copy()
                 retry_req.dont_filter = True
                 return retry_req
 
-        return super().process_exception(request, exception, spider)
+        return super().process_exception(request, exception)
 
-    def _schedule_recovery_check(self) -> None:
-        """Schedule a non-blocking TCP connectivity check after `CHECK_INTERVAL_SEC`."""
-        from twisted.internet import reactor
-        from twisted.internet.task import deferLater
-        from twisted.internet.threads import deferToThread
-
-        d = deferLater(reactor, self.CHECK_INTERVAL_SEC, deferToThread, _is_host_reachable)
-        d.addCallback(self._on_check_complete)
-
-    def _on_check_complete(self, reachable: bool) -> None:
+    def _resume_crawl(self) -> None:
+        """Unpause the Scrapy engine after the cooldown period expires."""
+        self._consecutive_errors = 0
+        self._paused = False
         active_spider = self.crawler.spider if self.crawler else None
         log = (
             active_spider.logger
             if active_spider is not None
             else logging.getLogger(ApartmentSitemapSpider.name)
         )
-        if reachable:
-            self._consecutive_errors = 0
-            self._paused = False
-            if self.crawler and self.crawler.engine and self.crawler.engine.paused:
-                self.crawler.engine.unpause()
-            log.info("Network connection restored, resuming crawl")
-        elif self._paused and self.crawler and self.crawler.engine and self.crawler.engine.running:
-            self._schedule_recovery_check()
+        if self.crawler and self.crawler.engine and self.crawler.engine.paused:
+            self.crawler.engine.unpause()
+            slot = getattr(self.crawler.engine, "_slot", None)
+            if slot is not None and getattr(slot, "nextcall", None) is not None:
+                slot.nextcall.schedule()
+        log.info("Cooldown complete, resuming crawl")
 
 
 class ApartmentSitemapSpider(SitemapSpider):
