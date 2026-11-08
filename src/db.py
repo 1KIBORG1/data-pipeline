@@ -1,12 +1,20 @@
+"""PostgreSQL database layer for the Nehnutelnosti.sk apartment pipeline.
+
+Manages database connections via environment variables, ensures table schema
+initialization, loads existing `updated_at` timestamps for incremental
+scraping, and executes idempotent `ON CONFLICT (id) DO UPDATE` upserts.
+"""
+
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import psycopg2
 from dotenv import load_dotenv
 from psycopg2.extensions import connection as Connection
-from pathlib import Path
 
+# Resolve .env relative to project root so cron/Docker/CLI runs find it from any working directory
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -33,6 +41,7 @@ CREATE TABLE IF NOT EXISTS apartments (
 );
 """
 
+# Idempotent upsert: inserts new listings or updates existing records when re-scraped
 UPSERT_APARTMENT_SQL = """
 INSERT INTO apartments (
     id, url, title, transaction_type, category_sub, rooms_count,
@@ -68,6 +77,7 @@ ON CONFLICT (id) DO UPDATE SET
 
 
 def get_connection() -> Connection:
+    """Create and return a new PostgreSQL connection configured via `.env` variables."""
     return psycopg2.connect(
         host=os.getenv("DB_HOST"),
         port=int(os.getenv("DB_PORT", "15432")),
@@ -75,26 +85,27 @@ def get_connection() -> Connection:
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
         sslmode=os.getenv("DB_SSLMODE", "disable"),
-        connect_timeout=10
+        connect_timeout=10,
     )
 
 
 def init_db(conn: Connection) -> None:
+    """Ensure the `apartments` table exists before scraping starts."""
     with conn:
         with conn.cursor() as cur:
             cur.execute(CREATE_APARTMENTS_TABLE_SQL)
 
 
 def upsert_apartment(conn: Connection, apt_data: dict[str, Any]) -> None:
+    """Insert or update a single validated apartment record inside a transaction."""
     with conn:
         with conn.cursor() as cur:
             cur.execute(UPSERT_APARTMENT_SQL, apt_data)
 
 
 def fetch_existing_timestamps(conn: Connection) -> dict[str, datetime | None]:
+    """Load `{id: updated_at}` mapping from PostgreSQL for incremental sitemap filtering."""
     with conn:
         with conn.cursor() as cur:
-            cur.execute('SELECT id, updated_at FROM apartments')
+            cur.execute("SELECT id, updated_at FROM apartments")
             return {row[0]: row[1] for row in cur.fetchall()}
-
-

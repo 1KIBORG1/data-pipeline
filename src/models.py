@@ -1,3 +1,11 @@
+"""Pydantic v2 data validation and normalization model for apartment listings.
+
+Applies field-level parsing (numbers, floors, room counts, districts) followed
+by cross-field domain consistency rules (filtering reserved/sold/wanted ads,
+resolving room count conflicts, enforcing realistic market price bounds, and
+recomputing price per square meter).
+"""
+
 import re
 import unicodedata
 from datetime import datetime
@@ -5,9 +13,11 @@ from typing import Any
 
 from pydantic import BaseModel, field_validator, model_validator
 
+# Valid building floor range in Slovakia (-2 = underground levels, 46 = Eurovea Tower)
 MIN_FLOOR = -2
 MAX_FLOOR = 46
 
+# Canonical room count mapping by Nehnutelnosti.sk apartment subcategory code
 ROOMS_BY_SUBCATEGORY: dict[str, int] = {
     "GARSONKA": 1,
     "STUDIO_APARTMENT": 1,
@@ -21,19 +31,21 @@ ROOMS_BY_SUBCATEGORY: dict[str, int] = {
     "FIVE_PLUS_ROOM_APARTMENT": 5,
 }
 
+# Diacritic-stripped title stems that indicate inactive, wanted, or non-apartment ads
 REJECT_TITLE_STEMS = (
-    "rezervovan",
-    "predan",
-    "prenajat",
-    "kupim",
-    "hladam",
-    "dopyt",
-    "samostatna izba",
-    "samostatne izby",
-    "spolubyvani",
-    "odstupeni",
+    "rezervovan",       # Reserved listings
+    "predan",           # Already sold listings
+    "prenajat",         # Already rented listings
+    "kupim",            # Buyer wanted ads ("Kúpim byt")
+    "hladam",           # Buyer wanted ads ("Hľadám byt")
+    "dopyt",            # Demand/inquiry ads
+    "samostatna izba",  # Single shared-room rentals
+    "samostatne izby",  # Shared rooms
+    "spolubyvani",      # Flatshare ads
+    "odstupeni",        # Lease/mortgage transfer ads ("Odstúpenie")
 )
 
+# Slovak numeral stems used in listing titles when room count is written as a word
 WORD_ROOMS_MAP: tuple[tuple[str, int], ...] = (
     ("jednoizb", 1),
     ("dvojizb", 2),
@@ -51,19 +63,28 @@ WORD_ROOMS_MAP: tuple[tuple[str, int], ...] = (
 
 
 def extract_rooms_from_title(title_clean: str) -> int | None:
+    """Extract room count from a normalized (lowercase, no-diacritics) listing title.
+
+    Handles numeric patterns (`1-izbový`, `2 izb.`, `3,5-izbový`, `2i`) as well as
+    Slovak word stems (`dvojizbový`, `garsónka`, `1kk`). Half-rooms (`1,5-izbový`)
+    are truncated to their integer base (`1`).
+    """
     match_rooms = re.search(
         r"\b([1-9])(?:[.,]\d+)?(?:\s*(?:[-–]\s*)?izb|\s*[-–]\s*i\b|i\b)",
         title_clean,
     )
     if match_rooms:
         return int(match_rooms.group(1))
+
     for stem, count in WORD_ROOMS_MAP:
         if stem in title_clean:
             return count
+
     return None
 
 
 def parse_positive_float(value: Any) -> float | None:
+    """Parse messy numeric strings (e.g. `'2 043,80 €/m²'`) into a positive float."""
     if value is None or isinstance(value, bool):
         return None
 
@@ -72,6 +93,7 @@ def parse_positive_float(value: Any) -> float | None:
 
     if isinstance(value, str):
         value = value.replace("\xa0", " ")
+        # Remove thousands-separator spaces between digits ("2 043" -> "2043")
         value = re.sub(r"(?<=\d)\s+(?=\d)", "", value)
         value = value.replace(",", ".")
 
@@ -86,6 +108,7 @@ def parse_positive_float(value: Any) -> float | None:
 
 
 def parse_floor(value: Any) -> int | None:
+    """Normalize Slovak floor descriptions (`'Prízemie'` -> 0, `'Suterén'` -> -1) to int."""
     if value is None or isinstance(value, bool):
         return None
 
@@ -109,6 +132,7 @@ def parse_floor(value: Any) -> int | None:
 
 
 def parse_rooms_count(value: Any) -> int | None:
+    """Parse raw room count attribute into an integer."""
     if value is None or isinstance(value, bool):
         return None
 
@@ -126,6 +150,7 @@ def parse_rooms_count(value: Any) -> int | None:
 
 
 def clean_district(value: Any) -> str | None:
+    """Strip the redundant `'okres '` prefix and normalize hyphen spacing in district names."""
     if not isinstance(value, str):
         return None
 
@@ -138,11 +163,14 @@ def clean_district(value: Any) -> str | None:
 
 
 def _remove_diacritics(value: str) -> str:
+    """Strip accents/diacritics from Unicode text using NFKD decomposition."""
     normalized = unicodedata.normalize("NFKD", value)
     return "".join(char for char in normalized if not unicodedata.combining(char))
 
 
 class ApartmentModel(BaseModel):
+    """Validated and normalized representation of a Slovak apartment listing."""
+
     id: str
     url: str
     title: str | None = None
@@ -167,6 +195,12 @@ class ApartmentModel(BaseModel):
         if not isinstance(value, str):
             return value
         return _remove_diacritics(value.strip()).casefold() or None
+
+    @field_validator("price_eur", mode="before")
+    @classmethod
+    def normalize_price_eur(cls, value: Any) -> int | None:
+        parsed = parse_positive_float(value)
+        return round(parsed) if parsed is not None else None
 
     @field_validator("area_sqm", "price_per_sqm_eur", mode="before")
     @classmethod
@@ -204,8 +238,10 @@ class ApartmentModel(BaseModel):
 
     @model_validator(mode="after")
     def validate_apartment_consistency(self) -> "ApartmentModel":
+        """Enforce cross-field domain rules, resolve room counts, and validate prices."""
         title_clean = _remove_diacritics(self.title).casefold() if self.title else ""
 
+        # 1. Reject reserved, sold, rented, or buyer-wanted ads based on title stems
         if title_clean:
             rejected_word = next(
                 (stem for stem in REJECT_TITLE_STEMS if stem in title_clean),
@@ -216,6 +252,7 @@ class ApartmentModel(BaseModel):
                     f"Apartment title contains a rejected stem: {rejected_word}"
                 )
 
+        # 2. Recover balcony/loggia/terrace flag from title if not checked in structured attributes
         if not self.has_balcony and title_clean:
             if not any(neg in title_clean for neg in ("bez balkon", "bez loggi", "bez lodzi")):
                 if any(
@@ -224,6 +261,7 @@ class ApartmentModel(BaseModel):
                 ):
                     self.has_balcony = True
 
+        # 3. Resolve room count priority: explicit title -> subcategory mapping -> raw attribute
         raw_rooms = (
             self.rooms_count
             if (self.rooms_count is not None and 1 <= self.rooms_count <= 10)
@@ -242,10 +280,12 @@ class ApartmentModel(BaseModel):
         else:
             self.rooms_count = raw_rooms
 
+        # 4. Nullify physically implausible apartment floor areas (< 10 m2 or > 600 m2)
         if self.area_sqm is not None and not (10.0 <= self.area_sqm <= 600.0):
             self.area_sqm = None
             self.price_per_sqm_eur = None
 
+        # 5. Enforce realistic market price bounds (filters out 1 EUR placeholders and typos)
         if self.price_eur is not None:
             if self.transaction_type == "prenajom":
                 if not (150 <= self.price_eur <= 10_000):
@@ -256,6 +296,7 @@ class ApartmentModel(BaseModel):
                     self.price_eur = None
                     self.price_per_sqm_eur = None
 
+        # 6. Always recompute unit price (EUR/m2) from validated price and area
         if self.price_eur is not None and self.area_sqm is not None and self.area_sqm > 0:
             pps = round(self.price_eur / self.area_sqm, 2)
             if self.transaction_type == "prenajom":
@@ -273,9 +314,11 @@ class ApartmentModel(BaseModel):
         else:
             self.price_per_sqm_eur = None
 
+        # 7. Clear country-level placeholder in city field
         if self.city and self.city.casefold() == "slovensko":
             self.city = None
 
+        # 8. Clear invalid total_floors (single-floor placeholders or floor > total_floors)
         if self.total_floors is not None and (
             self.total_floors <= 1
             or (self.floor is not None and self.floor > self.total_floors)
