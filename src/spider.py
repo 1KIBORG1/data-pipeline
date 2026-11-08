@@ -16,7 +16,7 @@ SPEED_PROFILES: dict[str, dict[str, Any]] = {
         "CONCURRENT_REQUESTS": 4,
         "CONCURRENT_REQUESTS_PER_DOMAIN": 4,
         "DOWNLOAD_DELAY": 0.8,
-        "RANDOMIZE_DOWNLOAD_DELAY": True,
+        "DOWNLOAD_DELAY_JITTER": 0.5,
         "AUTOTHROTTLE_ENABLED": True,
         "AUTOTHROTTLE_START_DELAY": 0.8,
         "AUTOTHROTTLE_MAX_DELAY": 4.0,
@@ -26,7 +26,7 @@ SPEED_PROFILES: dict[str, dict[str, Any]] = {
         "CONCURRENT_REQUESTS": 6,
         "CONCURRENT_REQUESTS_PER_DOMAIN": 6,
         "DOWNLOAD_DELAY": 0.4,
-        "RANDOMIZE_DOWNLOAD_DELAY": True,
+        "DOWNLOAD_DELAY_JITTER": 0.5,
         "AUTOTHROTTLE_ENABLED": True,
         "AUTOTHROTTLE_START_DELAY": 0.4,
         "AUTOTHROTTLE_MAX_DELAY": 3.0,
@@ -36,7 +36,7 @@ SPEED_PROFILES: dict[str, dict[str, Any]] = {
         "CONCURRENT_REQUESTS": 12,
         "CONCURRENT_REQUESTS_PER_DOMAIN": 12,
         "DOWNLOAD_DELAY": 0.15,
-        "RANDOMIZE_DOWNLOAD_DELAY": True,
+        "DOWNLOAD_DELAY_JITTER": 0.5,
         "AUTOTHROTTLE_ENABLED": True,
         "AUTOTHROTTLE_START_DELAY": 0.2,
         "AUTOTHROTTLE_MAX_DELAY": 2.0,
@@ -76,6 +76,7 @@ class ApartmentSitemapSpider(SitemapSpider):
         },
         "ROBOTSTXT_OBEY": False,
         "COOKIES_ENABLED": False,
+        "RESPONSE_MAX_ACTIVE_SIZE": 0,
         "DOWNLOAD_TIMEOUT": 90,
         "RETRY_ENABLED": True,
         "RETRY_TIMES": 5,
@@ -116,11 +117,10 @@ class ApartmentSitemapSpider(SitemapSpider):
             self._queued_count += 1
             yield entry
 
-    def parse_apartment(self, response: Response) -> Iterator[dict[str, Any]]:
+    def parse_apartment(self, response: Response) -> list[dict[str, Any]]:
         """Extract raw apartment dictionary from detail page HTML."""
         data = parse_apartment_html(response.text, url=response.url)
-        if data is not None:
-            yield data
+        return [data] if data is not None else []
 
 
 def build_scrapy_settings(speed: str, workers: int | None, log_level: str) -> dict[str, Any]:

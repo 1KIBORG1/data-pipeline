@@ -41,7 +41,7 @@ class PostgresPipeline:
         try:
             validated = ApartmentModel(**item).model_dump()
         except ValidationError as exc:
-            raise DropItem(f"Rejected apartment {item.get('id')}: {exc}")
+            raise DropItem(f"Rejected apartment {item.get('id')}: {exc}") from None
 
         if self.conn is not None:
             upsert_apartment(self.conn, validated)
