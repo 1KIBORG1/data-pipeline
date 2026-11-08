@@ -107,6 +107,18 @@ class PostgresPipeline:
 
         crawled = getattr(spider, "crawled_count", 0)
         total = getattr(spider, "queued_count", 0)
+        engine_paused = bool(self.crawler.engine and self.crawler.engine.paused)
+
+        if engine_paused:
+            spider.logger.warning(
+                "Progress: PAUSED (waiting for network) | crawled: %d/%d | saved: %d | skipped: %d",
+                crawled,
+                total,
+                self.saved_count,
+                self.skipped_count,
+            )
+            return
+
         crawl_start = getattr(spider, "crawl_start_time", None)
         elapsed_sec = (
             time.time() - crawl_start

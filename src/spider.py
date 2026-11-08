@@ -2,12 +2,17 @@
 
 import argparse
 import logging
+import socket
 from datetime import datetime
-from typing import Any, Iterator
+from typing import Any, Iterator, Self
 
-from scrapy.crawler import CrawlerProcess
-from scrapy.http import Response
+from scrapy.crawler import Crawler, CrawlerProcess
+from scrapy.downloadermiddlewares.retry import RetryMiddleware
+from scrapy.http import Request, Response
 from scrapy.spiders import SitemapSpider
+from twisted.internet import reactor
+from twisted.internet.task import deferLater
+from twisted.internet.threads import deferToThread
 
 from src.parser import parse_apartment_html
 
@@ -63,6 +68,107 @@ NOISY_SCRAPY_LOGGERS = (
 )
 
 
+def _is_host_reachable(
+    host: str = "www.nehnutelnosti.sk",
+    port: int = 443,
+    timeout: float = 5.0,
+) -> bool:
+    """Check TCP connectivity to the target host from a background thread."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+class NetworkResilientRetryMiddleware(RetryMiddleware):
+    """Pause the Scrapy engine during internet outages so queued URLs are not lost."""
+
+    OUTAGE_THRESHOLD = 3
+    CHECK_INTERVAL_SEC = 20.0
+
+    def __init__(self, settings: Any) -> None:
+        super().__init__(settings)
+        self.crawler: Crawler | None = None
+        self._consecutive_errors = 0
+        self._paused = False
+
+    @classmethod
+    def from_crawler(cls, crawler: Crawler) -> Self:
+        mw = cls(crawler.settings)
+        mw.crawler = crawler
+        return mw
+
+    def process_response(
+        self,
+        request: Request,
+        response: Response,
+        spider: Any = None,
+    ) -> Request | Response:
+        if response.status < 500 and response.status not in self.retry_http_codes:
+            self._consecutive_errors = 0
+        return super().process_response(request, response, spider)
+
+    def process_exception(
+        self,
+        request: Request,
+        exception: Exception,
+        spider: Any = None,
+    ) -> Request | Response | None:
+        if isinstance(exception, self.exceptions_to_retry):
+            self._consecutive_errors += 1
+            active_spider = spider or (self.crawler.spider if self.crawler else None)
+            is_sitemap_phase = getattr(active_spider, "queued_count", 0) == 0
+
+            if (
+                self._paused
+                or self._consecutive_errors >= self.OUTAGE_THRESHOLD
+                or is_sitemap_phase
+            ):
+                if not self._paused:
+                    self._paused = True
+                    if self.crawler and self.crawler.engine:
+                        self.crawler.engine.pause()
+                    log = (
+                        active_spider.logger
+                        if active_spider is not None
+                        else logging.getLogger(ApartmentSitemapSpider.name)
+                    )
+                    log.warning(
+                        "Network outage detected (%s). Pausing spider and waiting for connection...",
+                        exception.__class__.__name__,
+                    )
+                    self._schedule_recovery_check()
+
+                # Re-queue request without burning its retry counter while offline
+                retry_req = request.copy()
+                retry_req.dont_filter = True
+                return retry_req
+
+        return super().process_exception(request, exception, spider)
+
+    def _schedule_recovery_check(self) -> None:
+        """Schedule a non-blocking TCP connectivity check after `CHECK_INTERVAL_SEC`."""
+        d = deferLater(reactor, self.CHECK_INTERVAL_SEC, deferToThread, _is_host_reachable)
+        d.addCallback(self._on_check_complete)
+
+    def _on_check_complete(self, reachable: bool) -> None:
+        active_spider = self.crawler.spider if self.crawler else None
+        log = (
+            active_spider.logger
+            if active_spider is not None
+            else logging.getLogger(ApartmentSitemapSpider.name)
+        )
+        if reachable:
+            self._consecutive_errors = 0
+            self._paused = False
+            if self.crawler and self.crawler.engine and self.crawler.engine.paused:
+                self.crawler.engine.unpause()
+            log.info("Network connection restored, resuming crawl")
+        elif self._paused and self.crawler and self.crawler.engine and self.crawler.engine.running:
+            self._schedule_recovery_check()
+
+
 class ApartmentSitemapSpider(SitemapSpider):
     """Crawl apartment sale listings from Nehnutelnosti.sk XML sitemaps incrementally."""
 
@@ -98,6 +204,10 @@ class ApartmentSitemapSpider(SitemapSpider):
         "RETRY_ENABLED": True,
         "RETRY_TIMES": 5,
         "RETRY_HTTP_CODES": [408, 429, 500, 502, 503, 504, 522, 524],
+        "DOWNLOADER_MIDDLEWARES": {
+            "scrapy.downloadermiddlewares.retry.RetryMiddleware": None,
+            "src.spider.NetworkResilientRetryMiddleware": 550,
+        },
         "ITEM_PIPELINES": {
             "src.pipelines.PostgresPipeline": 300,
         },
