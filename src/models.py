@@ -31,18 +31,46 @@ ROOMS_BY_SUBCATEGORY: dict[str, int] = {
     "FIVE_PLUS_ROOM_APARTMENT": 5,
 }
 
-# Diacritic-stripped title stems that indicate inactive, wanted, or non-apartment ads
+# Diacritic-stripped title stems that indicate inactive, wanted, foreign, or non-apartment ads
 REJECT_TITLE_STEMS = (
-    "rezervovan",       # Reserved listings
-    "predan",           # Already sold listings
-    "prenajat",         # Already rented listings
-    "kupim",            # Buyer wanted ads ("Kúpim byt")
-    "hladam",           # Buyer wanted ads ("Hľadám byt")
-    "dopyt",            # Demand/inquiry ads
-    "samostatna izba",  # Single shared-room rentals
-    "samostatne izby",  # Shared rooms
-    "spolubyvani",      # Flatshare ads
-    "odstupeni",        # Lease/mortgage transfer ads ("Odstúpenie")
+    "rezervovan",              # Reserved listings ("rezervované", "rezervovaný")
+    "rezervovn",               # Common agency typo ("rezervovné")
+    "rezervvov",               # Common agency typo ("rezervvované")
+    "rezervovali",             # Reserved listings ("rezervovali sme")
+    "reserve",                 # French/English "RESERVÉ" / "RESERVED" tag in titles
+    "predan",                  # Already sold listings
+    "prenajat",                # Already rented listings
+    "kupim",                   # Buyer wanted ads ("Kúpim byt")
+    "hladam",                  # Buyer wanted ads ("Hľadám byt")
+    "dopyt",                   # Demand/inquiry ads
+    "vymen byt",               # House-for-apartment swap promotions
+    "samostatna izba",         # Single shared-room rentals
+    "samostatne izby",         # Shared rooms
+    "spolubyvani",             # Flatshare ads
+    "odstupeni",               # Lease/mortgage transfer ads ("Odstúpenie")
+    "drazb",                   # Auctions / foreclosures ("Dražba")
+    "vykup nehnutelnost",      # Property buyout promotions
+    "polovicny podiel",        # Partial 1/2 ownership shares
+    "penzion",                 # Commercial guest houses
+    "apartmanovy dom",         # Entire apartment buildings sold as a whole
+    "apartmanoveho domu",      # Entire apartment buildings sold as a whole (genitive)
+    "mobilny dom",             # Mobile homes on land plots
+    "testovaci inzerat",       # Portal internal QA test listings
+    "autofill addon",          # Portal internal QA test listings
+    "koja a parkovacie",       # Storage + parking bundles without an apartment
+    "na dlhodoby prenajom",    # Long-term rentals misclassified under sale
+    "prenajom - dlhodobo",     # Long-term rentals misclassified under sale
+    "dam do prenajmu",         # Rental offers misclassified under sale
+    "ponukame na prenajom",    # Rental offers misclassified under sale
+    "v chorvatsku",            # Foreign resort ads (Croatia)
+    "v rakuskych alpach",      # Foreign resort ads (Austria)
+    "pri mori",                # Foreign seaside property ads
+    "hurgada",                 # Foreign resort ads (Egypt)
+    "na bali",                 # Foreign resort ads (Indonesia)
+    "v spanielsku",            # Foreign resort ads (Spain)
+    "v bulharsku",             # Foreign resort ads (Bulgaria)
+    "v taliansku",             # Foreign resort ads (Italy)
+    "v dubaji",                # Foreign resort ads (UAE)
 )
 
 # Slovak numeral stems used in listing titles when room count is written as a word
@@ -57,7 +85,7 @@ WORD_ROOMS_MAP: tuple[tuple[str, int], ...] = (
     ("2garson", 2),
     ("dvojgarson", 2),
     ("garson", 1),
-    ("studiov", 1),
+    ("studio", 1),
     ("1kk", 1),
 )
 
@@ -65,12 +93,12 @@ WORD_ROOMS_MAP: tuple[tuple[str, int], ...] = (
 def extract_rooms_from_title(title_clean: str) -> int | None:
     """Extract room count from a normalized (lowercase, no-diacritics) listing title.
 
-    Handles numeric patterns (`1-izbový`, `2 izb.`, `3,5-izbový`, `2i`) as well as
-    Slovak word stems (`dvojizbový`, `garsónka`, `1kk`). Half-rooms (`1,5-izbový`)
-    are truncated to their integer base (`1`).
+    Handles numeric patterns (`1-izbový`, `2 izb.`, `2. izbový`, `3,5-izbový`, `2i`,
+    `6 izieb`, `3+kk`) as well as Slovak word stems (`dvojizbový`, `garsónka`,
+    `štúdio`, `1kk`). Half-rooms (`1,5-izbový`) are truncated to their integer base (`1`).
     """
     match_rooms = re.search(
-        r"\b([1-9])(?:[.,]\d+)?(?:\s*(?:[-–]\s*)?izb|\s*[-–]\s*i\b|i\b)",
+        r"\b([1-9])(?:[.,]\d+|\.)?(?:\s*(?:[-–]\s*)?(?:izb|izieb)|\s*[-–]\s*i\b|i\b|\s*\+\s*(?:kk|k|1)\b)",
         title_clean,
     )
     if match_rooms:
@@ -241,7 +269,7 @@ class ApartmentModel(BaseModel):
         """Enforce cross-field domain rules, resolve room counts, and validate prices."""
         title_clean = _remove_diacritics(self.title).casefold() if self.title else ""
 
-        # 1. Reject reserved, sold, rented, or buyer-wanted ads based on title stems
+        # 1. Reject reserved, sold, rented, foreign, or non-apartment ads based on title
         if title_clean:
             rejected_word = next(
                 (stem for stem in REJECT_TITLE_STEMS if stem in title_clean),
@@ -251,6 +279,15 @@ class ApartmentModel(BaseModel):
                 raise ValueError(
                     f"Apartment title contains a rejected stem: {rejected_word}"
                 )
+
+            if title_clean.startswith(("na prenajom", "prenajom ", "parkovacie miest")):
+                raise ValueError("Apartment title indicates a rental or standalone parking listing")
+
+            if re.search(r"\b(?:rodinny|dvojgeneracny)\s+dom\b", title_clean) and not any(
+                apt_kw in title_clean
+                for apt_kw in ("byt", "apartman", "garson", "mezonet", "loft", "studio")
+            ):
+                raise ValueError("Listing title indicates a family house rather than an apartment")
 
         # 2. Recover balcony/loggia/terrace flag from title if not checked in structured attributes
         if not self.has_balcony and title_clean:
