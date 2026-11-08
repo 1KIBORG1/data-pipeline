@@ -3,6 +3,7 @@
 import argparse
 import logging
 import socket
+import sys
 from datetime import datetime
 from typing import Any, Iterator, Self
 
@@ -10,9 +11,6 @@ from scrapy.crawler import Crawler, CrawlerProcess
 from scrapy.downloadermiddlewares.retry import RetryMiddleware
 from scrapy.http import Request, Response
 from scrapy.spiders import SitemapSpider
-from twisted.internet import reactor
-from twisted.internet.task import deferLater
-from twisted.internet.threads import deferToThread
 
 from src.parser import parse_apartment_html
 
@@ -55,17 +53,6 @@ SPEED_PROFILES: dict[str, dict[str, Any]] = {
         "AUTOTHROTTLE_ENABLED": False,
     },
 }
-
-# Internal Scrapy loggers that dump verbose startup/shutdown dictionaries at INFO level
-NOISY_SCRAPY_LOGGERS = (
-    "scrapy.addons",
-    "scrapy.crawler",
-    "scrapy.core.engine",
-    "scrapy.extensions",
-    "scrapy.middleware",
-    "scrapy.statscollectors",
-    "scrapy.utils.log",
-)
 
 
 def _is_host_reachable(
@@ -149,6 +136,10 @@ class NetworkResilientRetryMiddleware(RetryMiddleware):
 
     def _schedule_recovery_check(self) -> None:
         """Schedule a non-blocking TCP connectivity check after `CHECK_INTERVAL_SEC`."""
+        from twisted.internet import reactor
+        from twisted.internet.task import deferLater
+        from twisted.internet.threads import deferToThread
+
         d = deferLater(reactor, self.CHECK_INTERVAL_SEC, deferToThread, _is_host_reachable)
         d.addCallback(self._on_check_complete)
 
@@ -196,8 +187,6 @@ class ApartmentSitemapSpider(SitemapSpider):
         "COOKIES_ENABLED": False,
         "TELNETCONSOLE_ENABLED": False,
         "LOGSTATS_INTERVAL": 0,
-        "LOG_FORMAT": "%(asctime)s | %(levelname)-7s | %(message)s",
-        "LOG_DATEFORMAT": "%Y-%m-%d %H:%M:%S",
         "LOG_FORMATTER": "src.pipelines.CleanLogFormatter",
         "RESPONSE_MAX_ACTIVE_SIZE": 0,
         "DOWNLOAD_TIMEOUT": 90,
@@ -267,8 +256,7 @@ def build_scrapy_settings(speed: str, workers: int | None, log_level: str) -> di
     settings: dict[str, Any] = {
         **SPEED_PROFILES[speed],
         "LOG_LEVEL": log_level,
-        "LOG_FORMAT": "%(asctime)s | %(levelname)-7s | %(message)s",
-        "LOG_DATEFORMAT": "%Y-%m-%d %H:%M:%S",
+        "LOG_INSTALL_ROOT_HANDLER": False,
         "LOG_FORMATTER": "src.pipelines.CleanLogFormatter",
         "TELNETCONSOLE_ENABLED": False,
         "LOGSTATS_INTERVAL": 0,
@@ -281,11 +269,24 @@ def build_scrapy_settings(speed: str, workers: int | None, log_level: str) -> di
     return settings
 
 
-def silence_noisy_loggers(log_level: str) -> None:
-    """Suppress Scrapy's verbose startup and shutdown dictionary dumps unless DEBUG is enabled."""
+def setup_clean_logging(log_level: str) -> None:
+    """Configure a single root stream handler that filters out Scrapy's internal INFO dumps."""
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        logging.Formatter(
+            fmt="%(asctime)s | %(levelname)-7s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
     if log_level != "DEBUG":
-        for name in NOISY_SCRAPY_LOGGERS:
-            logging.getLogger(name).setLevel(logging.WARNING)
+        handler.addFilter(
+            lambda record: not (
+                record.name.startswith("scrapy") and record.levelno < logging.WARNING
+            )
+        )
+    logging.root.handlers.clear()
+    logging.root.addHandler(handler)
+    logging.root.setLevel(getattr(logging, log_level, logging.INFO))
 
 
 def parse_args() -> argparse.Namespace:
@@ -331,12 +332,12 @@ def extract_ad_id_from_url(url: str) -> str | None:
 
 if __name__ == "__main__":
     args = parse_args()
+    setup_clean_logging(args.log_level)
     scrapy_settings = build_scrapy_settings(
         speed=args.speed,
         workers=args.workers,
         log_level=args.log_level,
     )
-    silence_noisy_loggers(args.log_level)
     process = CrawlerProcess(settings=scrapy_settings)
     logging.getLogger(ApartmentSitemapSpider.name).info(
         "Starting spider (speed=%s, workers=%d, limit=%s)",

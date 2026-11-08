@@ -12,7 +12,6 @@ from scrapy.crawler import Crawler
 from scrapy.exceptions import DropItem
 from scrapy.http import Response
 from scrapy.logformatter import LogFormatter
-from twisted.internet.task import LoopingCall
 
 from src.db import fetch_existing_timestamps, get_connection, init_db, upsert_apartment
 from src.models import ApartmentModel
@@ -62,7 +61,7 @@ class PostgresPipeline:
         self.skipped_count = 0
         self.skipped_reasons: Counter[str] = Counter()
         self.start_time = 0.0
-        self._progress_task: LoopingCall | None = None
+        self._progress_task: Any = None
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
@@ -71,6 +70,9 @@ class PostgresPipeline:
 
     def open_spider(self) -> None:
         """Connect to PostgreSQL, initialize schema, preload timestamps, and start progress timer."""
+        # Import LoopingCall lazily after CrawlerProcess has installed AsyncioSelectorReactor
+        from twisted.internet.task import LoopingCall
+
         self.start_time = time.monotonic()
         self.conn = get_connection()
         init_db(self.conn)
