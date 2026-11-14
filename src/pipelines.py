@@ -122,10 +122,11 @@ class PostgresPipeline:
             return
 
         crawl_start = getattr(spider, "crawl_start_time", None)
+        paused_sec = getattr(spider, "paused_seconds", 0.0)
         elapsed_sec = (
-            time.time() - crawl_start
+            max(time.time() - crawl_start - paused_sec, 1.0)
             if crawl_start is not None
-            else time.monotonic() - self.start_time
+            else max(time.monotonic() - self.start_time - paused_sec, 1.0)
         )
         elapsed_min = max(elapsed_sec / 60.0, 1e-6)
         rate = crawled / elapsed_min

@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS apartments (
     total_floors SMALLINT,
     property_condition VARCHAR(64),
     has_elevator BOOLEAN NOT NULL DEFAULT FALSE,
-    has_balcony BOOLEAN NOT NULL DEFAULT FALSE,
+    has_balcony BOOLEAN,
     city VARCHAR(128),
     district VARCHAR(128),
     updated_at TIMESTAMPTZ,
@@ -90,10 +90,14 @@ def get_connection() -> Connection:
 
 
 def init_db(conn: Connection) -> None:
-    """Ensure the `apartments` table exists before scraping starts."""
+    """Ensure the `apartments` table exists and supports three-valued `has_balcony`."""
     with conn:
         with conn.cursor() as cur:
             cur.execute(CREATE_APARTMENTS_TABLE_SQL)
+            cur.execute(
+                "ALTER TABLE apartments ALTER COLUMN has_balcony DROP NOT NULL; "
+                "ALTER TABLE apartments ALTER COLUMN has_balcony DROP DEFAULT;"
+            )
 
 
 def upsert_apartment(conn: Connection, apt_data: dict[str, Any]) -> None:

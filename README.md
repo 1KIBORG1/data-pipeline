@@ -55,7 +55,7 @@ Defined in [`sql/init_schema.sql`](sql/init_schema.sql):
 | `total_floors` | `SMALLINT` | `NULL` | Total floors in building (`> 1` and `>= floor`) |
 | `property_condition` | `VARCHAR(64)` | `NULL` | Property condition (`Novostavba`, `Kompletná rekonštrukcia`, etc.) |
 | `has_elevator` | `BOOLEAN` | `NOT NULL` | Elevator flag (`DEFAULT FALSE`) |
-| `has_balcony` | `BOOLEAN` | `NOT NULL` | Balcony, loggia, or terrace flag (`DEFAULT FALSE`) |
+| `has_balcony` | `BOOLEAN` | `NULL` | Three-valued balcony, loggia, or terrace flag (`TRUE` = confirmed, `FALSE` = negated, `NULL` = unspecified) |
 | `city` | `VARCHAR(128)` | `NULL` | City or borough |
 | `district` | `VARCHAR(128)` | `NULL` | District name without `"okres "` prefix |
 | `updated_at` | `TIMESTAMPTZ` | `NULL` | Source modification timestamp |

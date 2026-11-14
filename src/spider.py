@@ -3,6 +3,7 @@
 import argparse
 import logging
 import sys
+import time
 from datetime import datetime
 from typing import Any, Iterator, Self
 
@@ -55,16 +56,19 @@ SPEED_PROFILES: dict[str, dict[str, Any]] = {
 
 
 class NetworkResilientRetryMiddleware(RetryMiddleware):
-    """Pause the Scrapy engine for a cooldown window on network/timeout errors."""
+    """Pause the Scrapy engine for a progressive cooldown window on network/timeout errors."""
 
     OUTAGE_THRESHOLD = 3
-    COOLDOWN_SEC = 30.0
+    BASE_COOLDOWN_SEC = 30.0
+    MAX_COOLDOWN_SEC = 240.0
 
     def __init__(self, settings: Any) -> None:
         super().__init__(settings)
         self._consecutive_errors = 0
+        self._consecutive_pauses = 0
         self._paused = False
         self._pause_epoch = 0
+        self._pause_started_at: float | None = None
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
@@ -85,6 +89,7 @@ class NetworkResilientRetryMiddleware(RetryMiddleware):
     ) -> Request | Response:
         if response.status < 500 and response.status not in self.retry_http_codes:
             self._consecutive_errors = 0
+            self._consecutive_pauses = 0
         return super().process_response(request, response)
 
     def process_exception(
@@ -109,6 +114,14 @@ class NetworkResilientRetryMiddleware(RetryMiddleware):
             if self._consecutive_errors >= self.OUTAGE_THRESHOLD or is_sitemap_phase:
                 self._paused = True
                 self._pause_epoch += 1
+                self._consecutive_pauses += 1
+                self._pause_started_at = time.time()
+
+                cooldown_sec = min(
+                    self.BASE_COOLDOWN_SEC * (2 ** min(self._consecutive_pauses - 1, 3)),
+                    self.MAX_COOLDOWN_SEC,
+                )
+
                 if self.crawler and self.crawler.engine:
                     self.crawler.engine.pause()
                 log = (
@@ -119,11 +132,11 @@ class NetworkResilientRetryMiddleware(RetryMiddleware):
                 log.warning(
                     "Network timeout/error (%s). Pausing spider for %.0fs cooldown...",
                     exception.__class__.__name__,
-                    self.COOLDOWN_SEC,
+                    cooldown_sec,
                 )
                 from twisted.internet import reactor
 
-                reactor.callLater(self.COOLDOWN_SEC, self._resume_crawl)
+                reactor.callLater(cooldown_sec, self._resume_crawl)
 
                 retry_req = request.copy()
                 retry_req.dont_filter = True
@@ -133,6 +146,12 @@ class NetworkResilientRetryMiddleware(RetryMiddleware):
 
     def _resume_crawl(self) -> None:
         """Unpause the Scrapy engine after the cooldown period expires."""
+        active_spider = self.crawler.spider if self.crawler else None
+        if self._pause_started_at is not None and active_spider is not None:
+            active_spider.paused_seconds = getattr(active_spider, "paused_seconds", 0.0) + (
+                time.time() - self._pause_started_at
+            )
+        self._pause_started_at = None
         self._consecutive_errors = 0
         self._paused = False
         try:
@@ -141,7 +160,6 @@ class NetworkResilientRetryMiddleware(RetryMiddleware):
             dnscache._cache.clear()
         except Exception:
             pass
-        active_spider = self.crawler.spider if self.crawler else None
         log = (
             active_spider.logger
             if active_spider is not None
@@ -184,6 +202,7 @@ class ApartmentSitemapSpider(SitemapSpider):
         "LOGSTATS_INTERVAL": 0,
         "LOG_FORMATTER": "src.pipelines.CleanLogFormatter",
         "RESPONSE_MAX_ACTIVE_SIZE": 0,
+        "DOWNLOAD_FAIL_ON_DATALOSS": False,
         "DOWNLOAD_TIMEOUT": 90,
         "RETRY_ENABLED": True,
         "RETRY_TIMES": 5,
@@ -206,6 +225,7 @@ class ApartmentSitemapSpider(SitemapSpider):
         self.unchanged_count = 0
         self.crawled_count = 0
         self.crawl_start_time: float | None = None
+        self.paused_seconds: float = 0.0
 
     def sitemap_filter(self, entries: Iterator[dict[str, Any]]) -> Iterator[dict[str, Any]]:
         """Yield only new or modified sitemap entries based on `<lastmod>` vs DB `updated_at`."""

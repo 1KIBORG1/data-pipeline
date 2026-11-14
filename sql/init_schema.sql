@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS apartments (
     total_floors SMALLINT,                           -- Total building floors (> 1)
     property_condition VARCHAR(64),                  -- Building state (e.g., 'Novostavba')
     has_elevator BOOLEAN NOT NULL DEFAULT FALSE,     -- Elevator availability
-    has_balcony BOOLEAN NOT NULL DEFAULT FALSE,      -- Balcony, loggia, or terrace availability
+    has_balcony BOOLEAN,                             -- Three-valued balcony/loggia/terrace (TRUE, FALSE, or NULL when unspecified)
     city VARCHAR(128),                               -- Municipality / city part
     district VARCHAR(128),                           -- District name without 'okres ' prefix
     updated_at TIMESTAMPTZ,                          -- Source listing update timestamp
