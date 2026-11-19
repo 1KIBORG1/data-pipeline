@@ -1,18 +1,24 @@
-"""Scrapy SitemapSpider for incremental scraping of Slovak apartment sales."""
+"""Scrapy SitemapSpider for incremental Medallion ELT scraping of Slovak apartments."""
+
+from __future__ import annotations
 
 import argparse
 import logging
 import sys
 import time
-from datetime import datetime
-from typing import Any, Iterator, Self
+from collections import Counter
+from collections.abc import Iterable, Iterator
+from contextlib import suppress
+from datetime import UTC, datetime
+from typing import Any, Self
 
+from scrapy import Spider
 from scrapy.crawler import Crawler, CrawlerProcess
 from scrapy.downloadermiddlewares.retry import RetryMiddleware
 from scrapy.http import Request, Response
 from scrapy.spiders import SitemapSpider
 
-from src.parser import parse_apartment_html
+from src.rsc_extractor import extract_ad_with_status, strip_bloat_fields
 
 # Predefined concurrency and throttling profiles selectable via `--speed`
 SPEED_PROFILES: dict[str, dict[str, Any]] = {
@@ -86,22 +92,22 @@ class NetworkResilientRetryMiddleware(RetryMiddleware):
         self,
         request: Request,
         response: Response,
+        spider: Spider | None = None,
     ) -> Request | Response:
         if response.status < 500 and response.status not in self.retry_http_codes:
             self._consecutive_errors = 0
             self._consecutive_pauses = 0
-        return super().process_response(request, response)
+        return super().process_response(request, response, spider)
 
     def process_exception(
         self,
         request: Request,
         exception: Exception,
+        spider: Spider | None = None,
     ) -> Request | Response | None:
         if isinstance(exception, self.exceptions_to_retry):
             req_epoch = request.meta.get("_sent_epoch", self._pause_epoch)
 
-            # Requests sent before the most recent pause belong to an older batch;
-            # re-queue them without counting toward a new pause after resume.
             if self._paused or req_epoch < self._pause_epoch:
                 retry_req = request.copy()
                 retry_req.dont_filter = True
@@ -142,24 +148,20 @@ class NetworkResilientRetryMiddleware(RetryMiddleware):
                 retry_req.dont_filter = True
                 return retry_req
 
-        return super().process_exception(request, exception)
+        return super().process_exception(request, exception, spider)
 
     def _resume_crawl(self) -> None:
         """Unpause the Scrapy engine after the cooldown period expires."""
         active_spider = self.crawler.spider if self.crawler else None
-        if self._pause_started_at is not None and active_spider is not None:
-            active_spider.paused_seconds = getattr(active_spider, "paused_seconds", 0.0) + (
-                time.time() - self._pause_started_at
-            )
+        if self._pause_started_at is not None and isinstance(active_spider, ApartmentSitemapSpider):
+            active_spider.paused_seconds += time.time() - self._pause_started_at
         self._pause_started_at = None
         self._consecutive_errors = 0
         self._paused = False
-        try:
+        with suppress(Exception):
             from scrapy.resolver import dnscache
 
-            dnscache._cache.clear()
-        except Exception:
-            pass
+            dnscache.clear()
         log = (
             active_spider.logger
             if active_spider is not None
@@ -173,8 +175,30 @@ class NetworkResilientRetryMiddleware(RetryMiddleware):
         log.info("Cooldown complete, resuming crawl")
 
 
+def _parse_utc_timestamp(raw: str | None) -> datetime | None:
+    """Parse an ISO-8601 sitemap timestamp into a timezone-aware UTC `datetime`."""
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def extract_ad_id_from_url(url: str) -> str | None:
+    """Extract the unique listing ID (`Ju...`) from a `/detail/<id>/<slug>` URL."""
+    if "/detail/" not in url:
+        return None
+    part = url.split("/detail/", 1)[1]
+    ad_id = part.split("/", 1)[0].strip()
+    return ad_id or None
+
+
 class ApartmentSitemapSpider(SitemapSpider):
-    """Crawl apartment sale listings from Nehnutelnosti.sk XML sitemaps incrementally."""
+    """Crawl Slovak apartment sales from XML sitemaps into Bronze `raw_listings`."""
 
     name = "nehnutelnosti_apartments"
     allowed_domains = ["nehnutelnosti.sk"]
@@ -212,47 +236,68 @@ class ApartmentSitemapSpider(SitemapSpider):
             "src.spider.NetworkResilientRetryMiddleware": 550,
         },
         "ITEM_PIPELINES": {
-            "src.pipelines.PostgresPipeline": 300,
+            "src.pipelines.BronzeRawPipeline": 300,
         },
     }
 
-    def __init__(self, limit: int | None = None, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        limit: int | None = None,
+        exclude_reserved: bool = False,
+        bronze_only: bool = False,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.limit = int(limit) if limit is not None else None
-        # Populated by PostgresPipeline.open_spider() before sitemap parsing begins
+        self.exclude_reserved = bool(exclude_reserved)
+        self.bronze_only = bool(bronze_only)
+        # Populated by BronzeRawPipeline.open_spider() before sitemap parsing begins
         self.existing_timestamps: dict[str, datetime | None] = {}
+        self.sitemap_lastmods: dict[str, datetime | None] = {}
+        self.seen_unchanged_ids: list[str] = []
+        self.extract_errors: Counter[str] = Counter()
+        self.run_started_at: datetime = datetime.now(UTC)
         self.queued_count = 0
         self.unchanged_count = 0
         self.crawled_count = 0
         self.crawl_start_time: float | None = None
         self.paused_seconds: float = 0.0
 
-    def sitemap_filter(self, entries: Iterator[dict[str, Any]]) -> Iterator[dict[str, Any]]:
-        """Yield only new or modified sitemap entries based on `<lastmod>` vs DB `updated_at`."""
+    def sitemap_filter(self, entries: Iterable[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+        """Yield only new or modified sitemap entries based on `<lastmod>` vs Bronze DB."""
+        if self.crawl_start_time is None:
+            self.run_started_at = datetime.now(UTC)
+
         for entry in entries:
             if self.limit is not None and self.queued_count >= self.limit:
                 break
 
             loc = entry.get("loc", "")
             ad_id = extract_ad_id_from_url(loc)
-            lastmod_raw = entry.get("lastmod")
+            sitemap_dt = _parse_utc_timestamp(entry.get("lastmod"))
 
-            # Skip HTTP download if listing is already in DB with an equal or newer timestamp
-            if ad_id and ad_id in self.existing_timestamps and lastmod_raw:
+            # Skip HTTP download if listing is already in Bronze with an equal or newer timestamp
+            if ad_id and ad_id in self.existing_timestamps and sitemap_dt is not None:
                 db_dt = self.existing_timestamps[ad_id]
                 if db_dt is not None:
-                    try:
-                        sitemap_dt = datetime.fromisoformat(lastmod_raw)
-                        if int(sitemap_dt.timestamp()) <= int(db_dt.timestamp()):
-                            self.unchanged_count += 1
-                            continue
-                    except ValueError:
-                        pass
+                    db_utc = (
+                        db_dt.replace(tzinfo=UTC)
+                        if db_dt.tzinfo is None
+                        else db_dt.astimezone(UTC)
+                    )
+                    if int(sitemap_dt.timestamp()) <= int(db_utc.timestamp()):
+                        self.unchanged_count += 1
+                        self.seen_unchanged_ids.append(ad_id)
+                        continue
 
+            if ad_id:
+                self.sitemap_lastmods[ad_id] = sitemap_dt
             self.queued_count += 1
             yield entry
 
-        self.crawl_start_time = datetime.now().timestamp()
+        if self.crawl_start_time is None:
+            self.crawl_start_time = time.time()
         self.logger.info(
             "Sitemap filtered: %d new/updated URLs queued (%d unchanged skipped)",
             self.queued_count,
@@ -260,10 +305,51 @@ class ApartmentSitemapSpider(SitemapSpider):
         )
 
     def parse_apartment(self, response: Response) -> list[dict[str, Any]]:
-        """Extract raw apartment dictionary from detail page HTML."""
+        """Unpack Next.js RSC payload into a Bronze `raw_listings` record with error telemetry."""
         self.crawled_count += 1
-        data = parse_apartment_html(response.text, url=response.url)
-        return [data] if data is not None else []
+        ad, status = extract_ad_with_status(response.text)
+
+        if status == "bot_challenge":
+            self.extract_errors[status] += 1
+            self.logger.warning(
+                "Bot/Cloudflare challenge detected on %s (total challenges: %d)",
+                response.url,
+                self.extract_errors[status],
+            )
+            return []
+
+        if status == "inactive":
+            self.extract_errors[status] += 1
+            if ad is not None and ad.get("id"):
+                ad_id = str(ad["id"])
+                return [
+                    {
+                        "id": ad_id,
+                        "url": response.url,
+                        "sitemap_lastmod": self.sitemap_lastmods.pop(ad_id, None),
+                        "is_active": False,
+                        "payload": strip_bloat_fields(ad),
+                        "last_seen_at": datetime.now(UTC),
+                    }
+                ]
+            return []
+
+        if status != "ok" or ad is None or not ad.get("id"):
+            self.extract_errors[status] += 1
+            self.logger.debug("RSC extraction status=%s on %s", status, response.url)
+            return []
+
+        ad_id = str(ad["id"])
+        return [
+            {
+                "id": ad_id,
+                "url": response.url,
+                "sitemap_lastmod": self.sitemap_lastmods.pop(ad_id, None),
+                "is_active": True,
+                "payload": strip_bloat_fields(ad),
+                "last_seen_at": datetime.now(UTC),
+            }
+        ]
 
 
 def build_scrapy_settings(speed: str, workers: int | None, log_level: str) -> dict[str, Any]:
@@ -305,7 +391,7 @@ def setup_clean_logging(log_level: str) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse CLI arguments for crawl limit, concurrency speed profile, and logging verbosity."""
+    """Parse CLI arguments for crawl limit, concurrency speed profile, and pipeline mode."""
     parser = argparse.ArgumentParser(
         description="Scrape Slovak apartment sale listings from Nehnutelnosti.sk into PostgreSQL."
     )
@@ -333,16 +419,19 @@ def parse_args() -> argparse.Namespace:
         default="INFO",
         help="Scrapy logging level (default: INFO).",
     )
+    parser.add_argument(
+        "--exclude-reserved",
+        action="store_true",
+        default=False,
+        help="Filter out reserved ('rezervované') listings during Silver refresh (default: False).",
+    )
+    parser.add_argument(
+        "--bronze-only",
+        action="store_true",
+        default=False,
+        help="Persist raw payloads to Bronze `raw_listings` only without refreshing Silver `apartments`.",
+    )
     return parser.parse_args()
-
-
-def extract_ad_id_from_url(url: str) -> str | None:
-    """Extract the unique listing ID (`Ju...`) from a `/detail/<id>/<slug>` URL."""
-    if "/detail/" not in url:
-        return None
-    part = url.split("/detail/", 1)[1]
-    ad_id = part.split("/", 1)[0].strip()
-    return ad_id or None
 
 
 if __name__ == "__main__":
@@ -355,10 +444,17 @@ if __name__ == "__main__":
     )
     process = CrawlerProcess(settings=scrapy_settings)
     logging.getLogger(ApartmentSitemapSpider.name).info(
-        "Starting spider (speed=%s, workers=%d, limit=%s)",
+        "Starting spider (speed=%s, workers=%d, limit=%s, exclude_reserved=%s, bronze_only=%s)",
         args.speed,
         scrapy_settings["CONCURRENT_REQUESTS"],
         args.limit,
+        args.exclude_reserved,
+        args.bronze_only,
     )
-    process.crawl(ApartmentSitemapSpider, limit=args.limit)
+    process.crawl(
+        ApartmentSitemapSpider,
+        limit=args.limit,
+        exclude_reserved=args.exclude_reserved,
+        bronze_only=args.bronze_only,
+    )
     process.start()
