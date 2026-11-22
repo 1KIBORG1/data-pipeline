@@ -1,0 +1,26 @@
+[project]
+name = "nehnutelnosti-data-pipeline"
+version = "2.0.0"
+description = "Incremental ELT pipeline for Slovak apartment sale listings (Nehnutelnosti.sk -> PostgreSQL 17)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+explicit_package_bases = true
+warn_return_any = false
+warn_unused_configs = true
+ignore_missing_imports = true
+check_untyped_defs = true

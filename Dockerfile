@@ -11,5 +11,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY sql/ ./sql/
 COPY src/ ./src/
 
+RUN useradd --create-home --shell /bin/bash appuser \
+    && chown -R appuser:appuser /app
+
+USER appuser
+
 ENTRYPOINT ["python", "-m", "src.spider"]
 CMD []
