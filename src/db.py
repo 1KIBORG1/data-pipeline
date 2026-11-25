@@ -72,7 +72,22 @@ ON CONFLICT (id) DO UPDATE SET
     city = EXCLUDED.city,
     district = EXCLUDED.district,
     updated_at = EXCLUDED.updated_at,
-    scraped_at = NOW();
+    scraped_at = NOW()
+WHERE (
+    apartments.url, apartments.title, apartments.transaction_type,
+    apartments.category_sub, apartments.rooms_count, apartments.price_eur,
+    apartments.price_per_sqm_eur, apartments.area_sqm, apartments.floor,
+    apartments.total_floors, apartments.property_condition,
+    apartments.has_elevator, apartments.has_balcony,
+    apartments.city, apartments.district, apartments.updated_at
+) IS DISTINCT FROM (
+    EXCLUDED.url, EXCLUDED.title, EXCLUDED.transaction_type,
+    EXCLUDED.category_sub, EXCLUDED.rooms_count, EXCLUDED.price_eur,
+    EXCLUDED.price_per_sqm_eur, EXCLUDED.area_sqm, EXCLUDED.floor,
+    EXCLUDED.total_floors, EXCLUDED.property_condition,
+    EXCLUDED.has_elevator, EXCLUDED.has_balcony,
+    EXCLUDED.city, EXCLUDED.district, EXCLUDED.updated_at
+);
 """
 
 
@@ -91,11 +106,11 @@ def get_connection(cfg: DatabaseConfig | None = None) -> Connection:
 
 
 def ensure_connection(conn: Connection | None, cfg: DatabaseConfig | None = None) -> Connection:
-    """Return an active PostgreSQL connection, transparently reconnecting if closed or broken."""
+    """Return an active PostgreSQL connection, reconnecting if closed or broken."""
     if conn is None or conn.closed != 0:
         return get_connection(cfg)
     try:
-        with conn.cursor() as cur:
+        with conn, conn.cursor() as cur:
             cur.execute("SELECT 1")
         return conn
     except psycopg2.Error:
@@ -111,7 +126,6 @@ def init_db(conn: Connection) -> None:
 
     with conn, conn.cursor() as cur:
         cur.execute(schema_sql)
-        # Only migrate legacy NOT NULL constraint on `has_balcony` if still present
         cur.execute(
             """
             SELECT is_nullable, column_default
@@ -131,19 +145,14 @@ def init_db(conn: Connection) -> None:
 
 
 def fetch_raw_timestamps(conn: Connection) -> dict[str, datetime | None]:
-    """Load `{id: sitemap_lastmod}` from `raw_listings` (including rejected/inactive IDs).
-
-    Using `raw_listings` rather than only `apartments` guarantees that previously rejected
-    listings (houses, rentals, buyer-wanted ads, foreign resorts) are NOT re-downloaded
-    on every subsequent incremental crawl unless their `<lastmod>` timestamp changes.
-    """
+    """Load `{id: COALESCE(sitemap_lastmod, scraped_at)}` from `raw_listings`."""
     with conn, conn.cursor() as cur:
         cur.execute("SELECT id, COALESCE(sitemap_lastmod, scraped_at) FROM raw_listings")
         return {row[0]: row[1] for row in cur.fetchall()}
 
 
 def fetch_existing_timestamps(conn: Connection) -> dict[str, datetime | None]:
-    """Load `{id: updated_at}` mapping from Silver `apartments` (legacy helper)."""
+    """Load `{id: updated_at}` mapping from Silver `apartments`."""
     with conn, conn.cursor() as cur:
         cur.execute("SELECT id, updated_at FROM apartments")
         return {row[0]: row[1] for row in cur.fetchall()}
@@ -176,7 +185,7 @@ def touch_seen_raw_listings(
     seen_ids: list[str],
     run_started_at: datetime,
 ) -> int:
-    """Refresh `last_seen_at` and `is_active = TRUE` for unchanged listings present in the sitemap."""
+    """Refresh `last_seen_at` and `is_active = TRUE` for listings present in the sitemap."""
     if not seen_ids:
         return 0
 
@@ -199,6 +208,23 @@ def touch_seen_raw_listings(
     return total_updated
 
 
+def mark_ids_inactive(conn: Connection, inactive_ids: list[str]) -> int:
+    """Explicitly mark confirmed expired listing IDs as `is_active = FALSE`."""
+    if not inactive_ids:
+        return 0
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE raw_listings
+            SET is_active = FALSE
+            WHERE id = ANY(%s)
+              AND is_active = TRUE;
+            """,
+            (inactive_ids,),
+        )
+        return cur.rowcount
+
+
 def mark_missing_listings_inactive(conn: Connection, run_started_at: datetime) -> int:
     """Mark Bronze listings absent from the latest full sitemap as `is_active = FALSE`."""
     with conn, conn.cursor() as cur:
@@ -214,6 +240,27 @@ def mark_missing_listings_inactive(conn: Connection, run_started_at: datetime) -
         return cur.rowcount
 
 
+def fetch_active_raw_page(
+    conn: Connection,
+    last_id: str,
+    limit: int = 1000,
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """Fetch one keyset-paginated batch of active `(id, url, payload)` rows."""
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, url, payload
+            FROM raw_listings
+            WHERE is_active = TRUE
+              AND id > %s
+            ORDER BY id ASC
+            LIMIT %s;
+            """,
+            (last_id, limit),
+        )
+        return [(row[0], row[1], row[2]) for row in cur.fetchall()]
+
+
 def iter_active_raw_listings(
     conn: Connection,
     batch_size: int = 1000,
@@ -221,28 +268,15 @@ def iter_active_raw_listings(
     """Stream `(id, url, payload)` tuples for all active Bronze listings using keyset pagination."""
     last_id = ""
     while True:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, url, payload
-                FROM raw_listings
-                WHERE is_active = TRUE
-                  AND id > %s
-                ORDER BY id ASC
-                LIMIT %s;
-                """,
-                (last_id, batch_size),
-            )
-            rows = cur.fetchall()
+        rows = fetch_active_raw_page(conn, last_id, batch_size)
         if not rows:
             break
-        for row in rows:
-            yield row[0], row[1], row[2]
+        yield from rows
         last_id = rows[-1][0]
 
 
 def upsert_apartments_batch(conn: Connection, rows: list[dict[str, Any]]) -> int:
-    """Batch-upsert validated apartment records into the Silver `apartments` table."""
+    """Batch-upsert validated apartment records into Silver `apartments` (skipping unchanged rows)."""
     if not rows:
         return 0
 

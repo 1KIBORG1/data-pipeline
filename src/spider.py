@@ -1,4 +1,4 @@
-"""Scrapy SitemapSpider for incremental Medallion ELT scraping of Slovak apartments."""
+"""Scrapy SitemapSpider for incremental scraping of Slovak apartment listings."""
 
 from __future__ import annotations
 
@@ -255,7 +255,9 @@ class ApartmentSitemapSpider(SitemapSpider):
         # Populated by BronzeRawPipeline.open_spider() before sitemap parsing begins
         self.existing_timestamps: dict[str, datetime | None] = {}
         self.sitemap_lastmods: dict[str, datetime | None] = {}
+        self.sitemap_seen_ids: list[str] = []
         self.seen_unchanged_ids: list[str] = []
+        self.confirmed_inactive_ids: set[str] = set()
         self.extract_errors: Counter[str] = Counter()
         self.run_started_at: datetime = datetime.now(UTC)
         self.queued_count = 0
@@ -276,6 +278,9 @@ class ApartmentSitemapSpider(SitemapSpider):
             loc = entry.get("loc", "")
             ad_id = extract_ad_id_from_url(loc)
             sitemap_dt = _parse_utc_timestamp(entry.get("lastmod"))
+
+            if ad_id:
+                self.sitemap_seen_ids.append(ad_id)
 
             # Skip HTTP download if listing is already in Bronze with an equal or newer timestamp
             if ad_id and ad_id in self.existing_timestamps and sitemap_dt is not None:
@@ -320,8 +325,10 @@ class ApartmentSitemapSpider(SitemapSpider):
 
         if status == "inactive":
             self.extract_errors[status] += 1
+            url_ad_id = extract_ad_id_from_url(response.url)
             if ad is not None and ad.get("id"):
                 ad_id = str(ad["id"])
+                self.confirmed_inactive_ids.add(ad_id)
                 return [
                     {
                         "id": ad_id,
@@ -332,6 +339,9 @@ class ApartmentSitemapSpider(SitemapSpider):
                         "last_seen_at": datetime.now(UTC),
                     }
                 ]
+            if url_ad_id:
+                self.confirmed_inactive_ids.add(url_ad_id)
+                self.sitemap_lastmods.pop(url_ad_id, None)
             return []
 
         if status != "ok" or ad is None or not ad.get("id"):

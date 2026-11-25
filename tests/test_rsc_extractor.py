@@ -128,11 +128,21 @@ class TestRscExtractor(unittest.TestCase):
         self.assertEqual(status, "bot_challenge")
         self.assertIsNone(ad)
 
-    def test_strip_bloat_fields_preserves_core_data(self) -> None:
+    def test_strip_bloat_fields_preserves_core_data_and_strips_pii(self) -> None:
         raw = {
             "id": "JuTrim",
             "title": "Byt",
             "parameters": {"area": "55"},
+            "advertiser": {
+                "id": "adv-1",
+                "name": "Ján Novák",
+                "firstName": "Ján",
+                "lastName": "Novák",
+                "mainPhone": "+421900111222",
+                "photoUrl": "https://img.example/avatar.jpg",
+                "type": "AGENT",
+                "isPro": True,
+            },
             "similarAdvertisements": [{"id": "x"}] * 20,
             "media": [{"url": "https://img.example/1.jpg"}] * 30,
             "pois": [{"name": "Shop"}] * 50,
@@ -140,6 +150,7 @@ class TestRscExtractor(unittest.TestCase):
         trimmed = strip_bloat_fields(raw)
         self.assertEqual(trimmed["id"], "JuTrim")
         self.assertEqual(trimmed["parameters"], {"area": "55"})
+        self.assertEqual(trimmed["advertiser"], {"type": "AGENT", "isPro": True})
         for bloat_key in BLOAT_TOP_LEVEL_KEYS:
             self.assertNotIn(bloat_key, trimmed)
 

@@ -18,6 +18,7 @@ from src.db import (
     fetch_raw_timestamps,
     get_connection,
     init_db,
+    mark_ids_inactive,
     mark_missing_listings_inactive,
     touch_seen_raw_listings,
     upsert_raw_listings_batch,
@@ -162,42 +163,75 @@ class BronzeRawPipeline:
             if spider is not None and self.conn is not None:
                 self.conn = ensure_connection(self.conn)
                 run_started_at = getattr(spider, "run_started_at", None)
-                seen_unchanged = getattr(spider, "seen_unchanged_ids", [])
+                confirmed_inactive: set[str] = set(
+                    getattr(spider, "confirmed_inactive_ids", set())
+                )
+                sitemap_seen: list[str] = list(
+                    getattr(spider, "sitemap_seen_ids", None)
+                    or getattr(spider, "seen_unchanged_ids", [])
+                )
 
+                explicitly_deactivated = 0
+                if confirmed_inactive:
+                    explicitly_deactivated = mark_ids_inactive(
+                        self.conn, list(confirmed_inactive)
+                    )
+
+                # Refresh last_seen_at for all sitemap-present IDs (including queued pages
+                # that hit transient HTTP/challenge errors, keeping their old sitemap_lastmod
+                # so they are retried next run without being falsely deleted today).
+                touch_candidates = (
+                    [aid for aid in sitemap_seen if aid not in confirmed_inactive]
+                    if confirmed_inactive
+                    else sitemap_seen
+                )
                 touched = 0
-                if seen_unchanged and run_started_at is not None:
-                    touched = touch_seen_raw_listings(self.conn, seen_unchanged, run_started_at)
+                if touch_candidates and run_started_at is not None:
+                    touched = touch_seen_raw_listings(
+                        self.conn, touch_candidates, run_started_at
+                    )
 
-                # Lifecycle deactivation + Silver pruning only on healthy full crawls (no --limit)
                 is_full_crawl = getattr(spider, "limit", None) is None
                 sitemap_total = getattr(spider, "queued_count", 0) + getattr(
                     spider, "unchanged_count", 0
                 )
                 existing_total = len(getattr(spider, "existing_timestamps", {}))
+                extract_errors = getattr(spider, "extract_errors", {})
+                crawled = getattr(spider, "crawled_count", 0)
+                hard_errors = (
+                    extract_errors.get("bot_challenge", 0)
+                    + extract_errors.get("missing_payload", 0)
+                    + extract_errors.get("parse_error", 0)
+                )
                 healthy_sitemap = sitemap_total > 0 and (
                     existing_total <= 100 or sitemap_total >= int(existing_total * 0.2)
                 )
+                healthy_extraction = crawled < 20 or hard_errors <= int(crawled * 0.5)
+                can_prune = is_full_crawl and healthy_sitemap and healthy_extraction
 
-                deactivated = 0
+                deactivated = explicitly_deactivated
                 if is_full_crawl and run_started_at is not None:
-                    if healthy_sitemap:
-                        deactivated = mark_missing_listings_inactive(self.conn, run_started_at)
+                    if can_prune:
+                        deactivated += mark_missing_listings_inactive(
+                            self.conn, run_started_at
+                        )
                     else:
                         spider.logger.warning(
-                            "Skipping inactive deactivation & Silver prune: sitemap returned only %d entries vs %d existing Bronze rows",
+                            "Skipping missing-listing deactivation & Silver prune "
+                            "(sitemap_entries=%d, existing=%d, crawled=%d, hard_errors=%d)",
                             sitemap_total,
                             existing_total,
+                            crawled,
+                            hard_errors,
                         )
 
                 elapsed = int(round(time.monotonic() - self.start_time))
                 minutes, seconds = divmod(elapsed, 60)
-                crawled = getattr(spider, "crawled_count", 0)
-                extract_errors = getattr(spider, "extract_errors", {})
                 err_str = ", ".join(f"{k}={v}" for k, v in extract_errors.items())
                 err_suffix = f" | extract_issues: ({err_str})" if err_str else ""
 
                 spider.logger.info(
-                    "Bronze crawl finished in %dm %02ds | crawled: %d | bronze_saved: %d | untouched_seen: %d | deactivated: %d%s",
+                    "Bronze crawl finished in %dm %02ds | crawled: %d | bronze_saved: %d | sitemap_touched: %d | deactivated: %d%s",
                     minutes,
                     seconds,
                     crawled,
@@ -212,7 +246,7 @@ class BronzeRawPipeline:
                     run_transform(
                         self.conn,
                         exclude_reserved=exclude_reserved,
-                        prune=(is_full_crawl and healthy_sitemap),
+                        prune=can_prune,
                         log=spider.logger,
                     )
         finally:

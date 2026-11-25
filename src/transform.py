@@ -19,9 +19,9 @@ from pydantic import ValidationError
 
 from src.db import (
     ensure_connection,
+    fetch_active_raw_page,
     get_connection,
     init_db,
-    iter_active_raw_listings,
     prune_apartments_not_in,
     upsert_apartments_batch,
 )
@@ -56,8 +56,10 @@ def extract_reject_reason(exc: ValidationError) -> str:
             return "inactive"
         if "monthly rental" in msg or "rental or swap" in msg:
             return "rental_or_swap"
-        if "commercial non-residential" in msg:
+        if "commercial non-residential" in msg or "generic space" in msg:
             return "commercial_space"
+        if "standalone storage" in msg:
+            return "storage_or_garage"
         if "multi-unit bundle" in msg:
             return "multi_unit_bundle"
         if "house or commercial building" in msg:
@@ -66,7 +68,7 @@ def extract_reject_reason(exc: ValidationError) -> str:
             return "dopyt_or_non_apartment_desc"
         if "townhouse or house with private land" in msg or "row house" in msg:
             return "townhouse_or_row_house"
-        if "spoofs Bratislava" in msg:
+        if "spoofs Bratislava" in msg or "claims Bratislava" in msg:
             return "bratislava_spoofing"
         if "outside the 79 official districts" in msg:
             return "foreign_district"
@@ -97,55 +99,69 @@ def run_transform(
 
     valid_ids: set[str] = set()
     buffer: list[dict[str, Any]] = []
+    initial_conn = conn
 
-    conn = ensure_connection(conn)
-    for _ad_id, url, payload in iter_active_raw_listings(conn, batch_size=1000):
-        stats.total_raw += 1
-        if not isinstance(payload, dict):
-            stats.skipped_parser += 1
-            stats.skipped_reasons["invalid_payload"] += 1
-            continue
+    try:
+        last_id = ""
+        while True:
+            conn = ensure_connection(conn)
+            page = fetch_active_raw_page(conn, last_id, limit=1000)
+            if not page:
+                break
+            last_id = page[-1][0]
 
-        raw_item = parse_apartment_desc_dict(payload, url=url)
-        if raw_item is None:
-            stats.skipped_parser += 1
-            stats.skipped_reasons["non_apartment_or_foreign"] += 1
-            continue
+            for _ad_id, url, payload in page:
+                stats.total_raw += 1
+                if not isinstance(payload, dict):
+                    stats.skipped_parser += 1
+                    stats.skipped_reasons["invalid_payload"] += 1
+                    continue
 
-        try:
-            validated = ApartmentModel(**raw_item, exclude_reserved=exclude_reserved).model_dump()
-        except ValidationError as exc:
-            reason = extract_reject_reason(exc)
-            stats.skipped_validation += 1
-            stats.skipped_reasons[reason] += 1
-            continue
+                raw_item = parse_apartment_desc_dict(payload, url=url)
+                if raw_item is None:
+                    stats.skipped_parser += 1
+                    stats.skipped_reasons["non_apartment_or_foreign"] += 1
+                    continue
 
-        valid_ids.add(validated["id"])
-        buffer.append(validated)
+                try:
+                    validated = ApartmentModel(
+                        **raw_item, exclude_reserved=exclude_reserved
+                    ).model_dump()
+                except ValidationError as exc:
+                    reason = extract_reject_reason(exc)
+                    stats.skipped_validation += 1
+                    stats.skipped_reasons[reason] += 1
+                    continue
 
-        if len(buffer) >= batch_size:
+                valid_ids.add(validated["id"])
+                buffer.append(validated)
+
+                if len(buffer) >= batch_size:
+                    if not dry_run:
+                        conn = ensure_connection(conn)
+                        upsert_apartments_batch(conn, buffer)
+                    stats.saved_silver += len(buffer)
+                    buffer.clear()
+
+        if buffer:
             if not dry_run:
                 conn = ensure_connection(conn)
                 upsert_apartments_batch(conn, buffer)
             stats.saved_silver += len(buffer)
             buffer.clear()
 
-    if buffer:
-        if not dry_run:
-            conn = ensure_connection(conn)
-            upsert_apartments_batch(conn, buffer)
-        stats.saved_silver += len(buffer)
-        buffer.clear()
-
-    if prune and not dry_run:
-        if stats.total_raw == 0 and not allow_empty_prune:
-            active_log.warning(
-                "Skipping Silver prune because Bronze `raw_listings` has 0 active rows "
-                "(pass --allow-empty-prune to force)."
-            )
-        else:
-            conn = ensure_connection(conn)
-            stats.pruned_silver = prune_apartments_not_in(conn, valid_ids)
+        if prune and not dry_run:
+            if stats.total_raw == 0 and not allow_empty_prune:
+                active_log.warning(
+                    "Skipping Silver prune because Bronze `raw_listings` has 0 active rows "
+                    "(pass --allow-empty-prune to force)."
+                )
+            else:
+                conn = ensure_connection(conn)
+                stats.pruned_silver = prune_apartments_not_in(conn, valid_ids)
+    finally:
+        if conn is not initial_conn and not conn.closed:
+            conn.close()
 
     stats.elapsed_sec = round(time.monotonic() - started, 2)
     top_reasons = ", ".join(f"{k}={v}" for k, v in stats.skipped_reasons.most_common(10))

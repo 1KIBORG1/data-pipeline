@@ -137,8 +137,15 @@ def find_ad_script(html: str) -> str | None:
 
 
 def strip_bloat_fields(ad: dict[str, Any]) -> dict[str, Any]:
-    """Return a shallow copy of the raw `advertisement` dict without bulky UI recommendation arrays."""
-    return {k: v for k, v in ad.items() if k not in BLOAT_TOP_LEVEL_KEYS}
+    """Strip bulky UI arrays and seller PII before persisting Bronze JSONB."""
+    cleaned = {k: v for k, v in ad.items() if k not in BLOAT_TOP_LEVEL_KEYS}
+    advertiser = cleaned.get("advertiser")
+    if isinstance(advertiser, dict):
+        # Retain only non-PII seller classification metadata (GDPR hygiene)
+        cleaned["advertiser"] = {
+            k: advertiser[k] for k in ("type", "isPro") if k in advertiser
+        }
+    return cleaned
 
 
 def extract_ad_with_status(html: str) -> tuple[dict[str, Any] | None, str]:
