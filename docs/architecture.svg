@@ -58,7 +58,7 @@
   <text class="title" x="298" y="110">Raw JSONB Storage</text>
   <text class="module" x="298" y="127">pipelines.py • db.py</text>
   <line x1="298" y1="138" x2="488" y2="138" stroke="#21262d"/>
-  <text class="desc" x="298" y="158">• Strips media/POI arrays</text>
+  <text class="desc" x="298" y="158">• Strips media, POI &amp; PII</text>
   <text class="desc" x="298" y="177">• Batched execute_values (100)</text>
   <text class="desc" x="298" y="196">• Auto-reconnect on idle drop</text>
   <text class="desc" x="298" y="215">• Deactivates missing listings</text>
@@ -88,7 +88,7 @@
   <line x1="806" y1="138" x2="996" y2="138" stroke="#21262d"/>
   <text class="desc" x="806" y="158">• Deduplicates agency clones</text>
   <text class="desc" x="806" y="177">• District median price / m²</text>
-  <text class="desc" x="806" y="196">• 6 SQL invariant checks</text>
+  <text class="desc" x="806" y="196">• Enriched view &amp; 6 invariants</text>
   <text class="desc" x="806" y="215">• Column completeness report</text>
   <rect class="code-pill" x="806" y="226" width="190" height="22"/>
   <text class="code-text pill-gold" x="901" y="241" text-anchor="middle">v_apartments_deduplicated</text>

@@ -4,13 +4,14 @@ import unittest
 from datetime import UTC, datetime
 
 from pydantic import ValidationError
+from scrapy.http import HtmlResponse
 
 from src.domain.area import compute_exact_portal_area, fix_missing_decimal_area
-from src.domain.reference import is_within_slovakia_gps
+from src.domain.reference import is_within_bratislava_gps, is_within_slovakia_gps
 from src.domain.sections import split_description_sections
 from src.models import ApartmentModel
 from src.parser import parse_apartment_desc_dict
-from src.spider import _parse_utc_timestamp, extract_ad_id_from_url
+from src.spider import ApartmentSitemapSpider, _parse_utc_timestamp, extract_ad_id_from_url
 
 
 class TestExactAreaAndDecimalCorrection(unittest.TestCase):
@@ -183,6 +184,53 @@ class TestStructuredGuardsAndRawAdapter(unittest.TestCase):
             district="Bratislava II",
         )
         self.assertEqual(apt.property_condition, "Vo výstavbe")
+
+    def test_bratislava_gps_spoofing_rejected(self) -> None:
+        self.assertTrue(is_within_bratislava_gps(48.1486, 17.1077))
+        self.assertFalse(is_within_bratislava_gps(48.2190, 17.4000))  # Senec
+
+        with self.assertRaises(ValidationError):
+            ApartmentModel(
+                id="JuSpoofGps",
+                url="https://www.nehnutelnosti.sk/detail/JuSpoofGps/x",
+                title="2-izbový byt v novostavbe",
+                category_sub="TWO_ROOM_APARTMENT",
+                city="Bratislava-Ružinov",
+                district="Bratislava II",
+                latitude=48.2190,
+                longitude=17.4000,
+            )
+
+    def test_spider_sitemap_lifecycle_tracks_queued_and_expired_ids(self) -> None:
+        spider = ApartmentSitemapSpider()
+        spider.existing_timestamps = {
+            "JuUnchanged": datetime(2026, 11, 20, 12, 0, tzinfo=UTC),
+            "JuUpdated": datetime(2026, 11, 18, 12, 0, tzinfo=UTC),
+        }
+        entries = [
+            {
+                "loc": "https://www.nehnutelnosti.sk/detail/JuUnchanged/byt-1",
+                "lastmod": "2026-11-20T12:00:00Z",
+            },
+            {
+                "loc": "https://www.nehnutelnosti.sk/detail/JuUpdated/byt-2",
+                "lastmod": "2026-11-21T12:00:00Z",
+            },
+        ]
+        queued = list(spider.sitemap_filter(entries))
+        self.assertEqual(len(queued), 1)
+        # Both unchanged AND queued entries must be recorded in sitemap_seen_ids
+        self.assertEqual(spider.sitemap_seen_ids, ["JuUnchanged", "JuUpdated"])
+        self.assertEqual(spider.seen_unchanged_ids, ["JuUnchanged"])
+
+        # Expired HTML banner must record the URL's ad_id in confirmed_inactive_ids
+        expired_resp = HtmlResponse(
+            url="https://www.nehnutelnosti.sk/detail/JuUpdated/byt-2",
+            body="<html><body>Tento inzerát už nie je aktuálny</body></html>".encode(),
+            encoding="utf-8",
+        )
+        self.assertEqual(spider.parse_apartment(expired_resp), [])
+        self.assertIn("JuUpdated", spider.confirmed_inactive_ids)
 
     def test_spider_utc_and_id_helpers(self) -> None:
         self.assertEqual(

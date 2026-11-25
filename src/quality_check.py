@@ -146,16 +146,16 @@ def run_quality_check(conn: Connection) -> int:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT district, listings_count, median_price_eur, avg_price_per_sqm_eur, median_area_sqm
+            SELECT district, listings_count, median_price_eur, median_price_per_sqm_eur, median_area_sqm
             FROM v_district_price_summary
             LIMIT 10;
             """
         )
         rows = cur.fetchall()
-    print(f"  {'District':<24s} {'Count':>7s} {'Median EUR':>12s} {'Avg EUR/m2':>10s} {'Area m2':>8s}")
-    for dist, cnt, med_p, avg_pps, med_a in rows:
+    print(f"  {'District':<24s} {'Count':>7s} {'Median EUR':>12s} {'Med EUR/m2':>10s} {'Area m2':>8s}")
+    for dist, cnt, med_p, med_pps, med_a in rows:
         p_str = f"{med_p:,.0f}" if med_p is not None else "--"
-        pps_str = f"{avg_pps:,.0f}" if avg_pps is not None else "--"
+        pps_str = f"{med_pps:,.0f}" if med_pps is not None else "--"
         a_str = f"{med_a:.1f}" if med_a is not None else "--"
         print(f"  {str(dist):<24s} {cnt:>7,d} {p_str:>12s} {pps_str:>10s} {a_str:>8s}")
 

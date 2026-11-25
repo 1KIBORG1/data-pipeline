@@ -15,9 +15,9 @@ Data moves through three layers inside PostgreSQL 17:
 
 | Layer | Object | Purpose |
 | :--- | :--- | :--- |
-| **Bronze** | `raw_listings` (`JSONB`) | Raw Next.js RSC payloads (with media/recommendation arrays stripped) plus `sitemap_lastmod`, `is_active`, `first_seen_at`, and `last_seen_at`. |
-| **Silver** | `apartments` (18 columns) | Cleaned and validated apartment table rebuilt from active Bronze rows via `ApartmentModel`. |
-| **Gold** | `v_apartments_deduplicated`, `v_district_price_summary` | Read-only SQL views for cross-agency deduplication (`ROW_NUMBER()`) and district median price/area summaries. |
+| **Bronze** | `raw_listings` (`JSONB`) | Raw Next.js RSC payloads (with media, POI, and seller PII stripped) plus `sitemap_lastmod`, `is_active`, `first_seen_at`, and `last_seen_at`. |
+| **Silver** | `apartments` (18 columns) | Cleaned and validated apartment table rebuilt from active Bronze rows via `ApartmentModel` (`IS DISTINCT FROM` upserts skip unchanged rows). |
+| **Gold** | `v_apartments_deduplicated`, `v_district_price_summary`, `v_apartments_enriched` | Read-only SQL views for resale deduplication, district median price/area summaries, and Bronze-joined attributes (`street`, GPS, `construction`, `year_of_construction`). |
 
 Separating Bronze storage from Silver transformation lets parsing and validation rules be updated and re-applied across ~15,000 listings in a few seconds (`python -m src.transform`) without re-crawling the site.
 
@@ -26,9 +26,9 @@ Separating Bronze storage from Silver transformation lets parsing and validation
 ### 1. Sitemap Crawl & RSC Extraction (`src/spider.py`, `src/rsc_extractor.py`, `src/pipelines.py`)
 * `ApartmentSitemapSpider` reads `sitemap-listings-byty-predaj-slovensko.xml`.
 * On startup, `BronzeRawPipeline.open_spider()` loads `{id: COALESCE(sitemap_lastmod, scraped_at)}` from `raw_listings` (including previously rejected or inactive IDs so they are not re-fetched on every run).
-* Unchanged URLs are skipped by UTC timestamp comparison and have `last_seen_at` refreshed via `touch_seen_raw_listings()`.
-* On full crawls (without `--limit`), listings missing from the sitemap are marked `is_active = FALSE`. Deactivation is skipped if the sitemap returns fewer than 20% of known listings to avoid wiping state on upstream failures.
-* Listing pages use Next.js App Router RSC Flight streams (`self.__next_f.push(...)`). `src/rsc_extractor.py` unpacks the `advertisement` object, resolves out-of-line text chunks (`$ref` with UTF-8 byte lengths, falling back to JSON-LD), checks `isActive`, flags bot-challenge pages, and strips large UI fields before batched `execute_values` upserts.
+* Unchanged URLs are skipped by UTC timestamp comparison; all sitemap-present IDs (except pages confirmed expired during the run) have `last_seen_at` refreshed via `touch_seen_raw_listings()` so transient HTTP/challenge errors do not deactivate active listings.
+* On full crawls (without `--limit`), listings missing from the sitemap are marked `is_active = FALSE`. Deactivation and Silver pruning are skipped if the sitemap returns fewer than 20% of known listings or over 50% of crawled pages fail extraction.
+* Listing pages use Next.js App Router RSC Flight streams (`self.__next_f.push(...)`). `src/rsc_extractor.py` unpacks the `advertisement` object, resolves out-of-line text chunks (`$ref` with UTF-8 byte lengths, falling back to JSON-LD), checks `isActive`, flags bot-challenge pages, and strips UI bloat and seller PII before batched `execute_values` upserts.
 
 ### 2. Normalization & Validation (`src/transform.py`, `src/domain/`, `src/models.py`)
 At the end of a crawl (unless `--bronze-only` is set), or standalone via `python -m src.transform`, active Bronze rows pass through `parse_apartment_desc_dict()` and `ApartmentModel`:
@@ -73,8 +73,8 @@ Defined in [`sql/init_schema.sql`](sql/init_schema.sql) and [`sql/views.sql`](sq
 | `category_sub` | `VARCHAR(64)` | `NULL` | Subcategory code (`ONE_ROOM_APARTMENT`, `STUDIO_APARTMENT`, etc.) |
 | `rooms_count` | `SMALLINT` | `NULL` | Room count (`1..10`) |
 | `price_eur` | `INTEGER` | `NULL` | Total price in EUR (`15,000..5,000,000`, `NULL` if omitted or out of bounds) |
-| `price_per_sqm_eur` | `NUMERIC(10, 2)` | `NULL` | Unit price in EUR/$\text{m}^2$ (`ROUND(price_eur / area_sqm, 2)`) |
-| `area_sqm` | `NUMERIC(8, 2)` | `NULL` | Interior floor area in $\text{m}^2$ (`10.0..600.0`) |
+| `price_per_sqm_eur` | `NUMERIC(10, 2)` | `NULL` | Unit price in EUR/m² (`ROUND(price_eur / area_sqm, 2)`) |
+| `area_sqm` | `NUMERIC(8, 2)` | `NULL` | Interior floor area in m² (`10.0..600.0`) |
 | `floor` | `SMALLINT` | `NULL` | Floor number (`-2..46`, `0` = ground floor) |
 | `total_floors` | `SMALLINT` | `NULL` | Total floors in building (`> 1` and `>= floor`) |
 | `property_condition` | `VARCHAR(64)` | `NULL` | Property condition (`Novostavba`, `Kompletná rekonštrukcia`, etc.) |
@@ -95,7 +95,7 @@ data-pipeline/
 │   └── data_flow.svg
 ├── sql/
 │   ├── init_schema.sql             # raw_listings + apartments + indexes
-│   └── views.sql                   # v_apartments_deduplicated, v_district_price_summary
+│   └── views.sql                   # v_apartments_deduplicated, v_district_price_summary, v_apartments_enriched
 ├── src/
 │   ├── config.py                   # .env / DatabaseConfig
 │   ├── db.py                       # psycopg2 persistence and batch upserts

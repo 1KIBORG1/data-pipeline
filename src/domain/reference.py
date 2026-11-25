@@ -14,6 +14,10 @@ MAX_FLOOR = 46
 SLOVAKIA_LAT_MIN, SLOVAKIA_LAT_MAX = 47.70, 49.65
 SLOVAKIA_LON_MIN, SLOVAKIA_LON_MAX = 16.80, 22.60
 
+# Geographic bounding box of Bratislava (districts I-V, Čunovo to Záhorská Bystrica)
+BRATISLAVA_LAT_MIN, BRATISLAVA_LAT_MAX = 48.00, 48.27
+BRATISLAVA_LON_MIN, BRATISLAVA_LON_MAX = 16.93, 17.28
+
 # Official 79 districts (okresy) of the Slovak Republic + city-level fallbacks
 SLOVAK_DISTRICTS: frozenset[str] = frozenset({
     "Bánovce nad Bebravou",
@@ -168,7 +172,6 @@ REJECT_TITLE_STEMS: tuple[str, ...] = (
     "vymena bytu",
     "vykup nehnutelnost",
     "platba v hotovosti",
-    "1-2 izb byt,hotovost",
     # Shared rooms / dormitories / auctions / partial ownership / transfers
     "samostatna izba",
     "samostatne izby",
@@ -178,7 +181,7 @@ REJECT_TITLE_STEMS: tuple[str, ...] = (
     "drazb",
     "polovicny podiel",
     "spoluvlastnicky podiel",
-    # Whole buildings / commercial hospitality / non-residential spaces / garages / raw attics
+    # Whole buildings / commercial hospitality / garages
     "penzion",
     "ubytovaci komplex",
     "developerskeho arealu",
@@ -188,16 +191,10 @@ REJECT_TITLE_STEMS: tuple[str, ...] = (
     "prerobena budova",
     "investicna budova",
     "samostatna budova",
-    "a polyfunkcny dom",
-    "apartmanov + 2 domy",
+    "polyfunkcny dom",
     "kancelarsky priestor",
-    "multifunkcny priestor",
-    "obrovsky priestor",
-    "zaujimavy priestor s pozemkom",
-    "podkrovny priestor",
     "predaj garaze",
-    "koja a parkovacie",
-    "vodarenska studna",
+    "garaz na predaj",
     # Family houses / townhouses / cottages
     "mobilny dom",
     "bungalov",
@@ -209,7 +206,6 @@ REJECT_TITLE_STEMS: tuple[str, ...] = (
     "trojdom",
     "dvojdom",
     "byt v rd",
-    "4i chyzka so zahradkou",
     "horska chata",
     # Portal QA test placeholders
     "testovaci inzerat",
@@ -321,6 +317,18 @@ def is_within_slovakia_gps(latitude: float | None, longitude: float | None) -> b
     return (
         SLOVAKIA_LAT_MIN <= latitude <= SLOVAKIA_LAT_MAX
         and SLOVAKIA_LON_MIN <= longitude <= SLOVAKIA_LON_MAX
+    )
+
+
+def is_within_bratislava_gps(latitude: float | None, longitude: float | None) -> bool:
+    """Return True if coordinates are omitted or fall within Bratislava's WGS84 bounding box."""
+    if latitude is None or longitude is None:
+        return True
+    if abs(latitude) < 0.01 and abs(longitude) < 0.01:
+        return True
+    return (
+        BRATISLAVA_LAT_MIN <= latitude <= BRATISLAVA_LAT_MAX
+        and BRATISLAVA_LON_MIN <= longitude <= BRATISLAVA_LON_MAX
     )
 
 

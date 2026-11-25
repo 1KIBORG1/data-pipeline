@@ -10,8 +10,19 @@ from src.domain.reference import (
     REJECT_TITLE_STEMS,
     RESERVED_TITLE_STEMS,
     SLOVAK_DISTRICTS,
+    is_within_bratislava_gps,
     is_within_slovakia_gps,
     normalize_text,
+)
+
+# Neighboring districts, regions, and commuter-belt municipalities outside Bratislava I-V
+_BRATISLAVA_EXTERNAL_LOC_RE = re.compile(
+    r"\b(?:"
+    r"okres\s+(?:senec|dunajska\s+streda|trnava|galanta|pezinok|malacky|hlohovec)"
+    r"|v\s+(?:tt|trnavskom|nitrianskom)\s+kraji"
+    r"|v\s+(?:hamuliakove|rovinke|dunajskej\s+luznej|miloslavove|bernolakove"
+    r"|chorvatskom\s+grobe|ivanke\s+pri\s+dunaji|stupave|marianke|dvornikoch)"
+    r")\b"
 )
 
 
@@ -41,7 +52,7 @@ def validate_entity_and_scope(
     if not is_active:
         raise ValueError("Listing is marked inactive on Nehnutelnosti.sk")
 
-    # 1. Structured geographic scope (GPS bounding box + foreign border street guard)
+    # 1. Geographic scope (Slovakia WGS84 bounding box + border street check)
     if not is_within_slovakia_gps(latitude, longitude):
         raise ValueError(f"Listing GPS coordinates ({latitude}, {longitude}) are outside Slovakia")
 
@@ -49,7 +60,7 @@ def validate_entity_and_scope(
     if street_clean in FOREIGN_STREETS:
         raise ValueError(f"Listing street indicates a foreign property: {street}")
 
-    # 2. Structured monthly-rent indicator in portal price string (e.g. '850 €/mes.')
+    # 2. Monthly-rent unit in structured portal price string (e.g. '850 €/mes.')
     price_disp_clean = normalize_text(price_display)
     if "/mes" in price_disp_clean or "mesacne" in price_disp_clean:
         raise ValueError("Listing portal price indicates a monthly rental (/mes.)")
@@ -59,7 +70,7 @@ def validate_entity_and_scope(
     vlast_clean = normalize_text(vlastnictvo)
     constr_clean = normalize_text(construction)
 
-    # 3. Title entity gate (QA placeholders, optional reserved filter, wanted/sold/commercial/house)
+    # 3. Title entity filters (QA placeholders, optional reserved filter, wanted/commercial/house)
     if title_clean:
         if title_clean in ("test", "skuska", "inzerat"):
             raise ValueError("Listing is an internal QA test placeholder")
@@ -79,10 +90,12 @@ def validate_entity_and_scope(
         if rejected_word is not None:
             raise ValueError(f"Apartment title contains a rejected stem: {rejected_word}")
 
+        if re.search(r",\s*hotovost\b", title_clean):
+            raise ValueError("Apartment title contains a rejected stem: hotovost")
+
         if title_clean.startswith(("na prenajom", "prenajom ", "parkovacie miest", "podkrovie ")):
             raise ValueError("Apartment title indicates a rental, parking, or raw attic listing")
 
-        # Pure rental or swap ads without a valid sale price (monthly rents < 15,000 EUR cleared beforehand)
         if price_eur is None:
             tc_no_inv = re.sub(
                 r"\b(?:vhodn\w*|idealn\w*)\s+(?:aj\s+)?na\s+(?:dlhodob\w*\s+(?:i\s+|aj\s+)?|kratkodob\w*\s+)*(?:prenajom|kancelari\w*)\b",
@@ -116,7 +129,7 @@ def validate_entity_and_scope(
             ):
                 raise ValueError("Listing title indicates a commercial non-residential space")
 
-        # Divided "2 apartments in 1" packages and whole multi-unit residential buildings
+        # Divided multi-unit bundles ("2 byty v 1") or house bundles
         tc_no_moz = re.sub(
             r"\bmoznost\w*\s+(?:vytvorenia\s+)?\d+\s+bytov\w*\s+jednot\w*",
             "",
@@ -129,19 +142,47 @@ def validate_entity_and_scope(
             r"|(?:2|3|dva|tri)\s+byty\s+v\s+(?:1|jednom)\b"
             r"|(?:2|3|4|5|6|7|8)\s*x\s*byt\b"
             r"|(?:2|3|4|5|6|7|8|dve|dvomi|tri)\s+(?:kompletne\s+zariaden\w+\s+)?(?:samostatn\w+\s+)?byt(?:ov\w+|\.)\s+jednot\w*"
-            r"|\d\s*i\.?\s*(?:rodinny\s+)?(?:dom|rd)\b)\b",
+            r"|\d\s*i\.?\s*(?:rodinny\s+)?(?:dom|rd)\b)\b"
+            r"|\+\s*\d+\s*dom",
             tc_no_moz,
         ):
             raise ValueError("Listing title indicates a multi-unit bundle or house")
 
-        # Family houses, villas, cottages, and commercial buildings when no apartment keyword is present
+        # Non-residential spaces, standalone storage/utility units, houses, and cottages when no apartment keyword is present
         tc_for_apt_kw = re.sub(
             r"\b(?:v\s+cene|za\s+cenu)\s+(?:mini\s+)?(?:\d+\s*-?\s*izb\w*\s+)?(?:bytu|garson\w*|garzon\w*)\b",
             " ",
             title_clean,
         )
         has_apt_kw = any(kw in tc_for_apt_kw for kw in APARTMENT_KEYWORDS)
+        if not has_apt_kw:
+            has_room_layout = bool(re.search(r"\b[1-6]\s*(?:-?\s*izb|\s*i\b)", tc_for_apt_kw))
+            if not has_room_layout and re.search(
+                r"\b(?:pivnicn\w*\s+(?:kobk\w*|koja)|skladov\w*\s+(?:kobk\w*|koja)|koja"
+                r"|samostatn\w*\s+(?:garaz\w*|pivnic\w*)|vodarensk\w*\s+studn\w*|studn(?:a|u|e))\b",
+                tc_for_apt_kw,
+            ):
+                raise ValueError("Listing title indicates a standalone storage, garage, or utility unit")
+
         if not has_apt_kw and "panelov" not in constr_clean:
+            if re.search(r"\bpriestor\b", tc_for_apt_kw):
+                is_qualified_space = bool(
+                    re.search(
+                        r"\b(?:podkrovn\w*|multifunkcn\w*|komercn\w*|prevadzkov\w*|investicn\w*"
+                        r"|exkluzivn\w*|unikatn\w*|zaujimav\w*|obrovsk\w*|\d+\s*-?\s*izbov\w*)\s+priestor\b"
+                        r"|\bpriestor\b[^,.;]*\bs\s+pozemkom\b",
+                        tc_for_apt_kw,
+                    )
+                )
+                has_residential_context = bool(
+                    re.search(
+                        r"\b(?:byvani\w*|domov\w*|[1-6]\s*-?\s*izb\w*|poschod\w*|balkon\w*|loggi\w*|lodzi\w*)\b",
+                        tc_for_apt_kw,
+                    )
+                )
+                if is_qualified_space or not has_residential_context:
+                    raise ValueError("Listing title indicates a generic space without apartment designation")
+
             tc_no_loc = (
                 tc_for_apt_kw.replace("zochova chata", "")
                 .replace("dom-realit", "")
@@ -159,13 +200,14 @@ def validate_entity_and_scope(
             if re.search(
                 r"\b(?:dom(?:u|e|y|om|och|ami)?\b|rodinnych\s+domov\b|viladom(?:u|y|ov)?\b"
                 r"|vila\b|vily\b|vilu\b|villa\b|chata\b|chaty\b|chatu\b|chate\b|chalup\w*"
+                r"|chyzk\w*\s+so\s+(?:zahrad\w*|pozemk\w*)"
                 r"|podnikatelsk\w+\s+objekt\w*|budov\w+\s+na\s+podnikanie|polyfunkcn\w+\s+objekt\w*"
                 r"|administrativn\w+\s+(?:budov\w*|objekt\w*))\b",
                 tc_no_loc,
             ):
                 raise ValueError("Listing title indicates a house or commercial building rather than an apartment")
 
-    # 4. Description & structural attribute gate (DOPYT, townhouses, LV priestor, 2-in-1 splits)
+    # 4. Description & structural attribute checks (buyer-wanted DOPYT, LV priestor, townhouses, 2-in-1 splits)
     if desc_clean and re.search(
         r"\b(?:"
         r"pre\s+(?:konkretneho\s+|nasich\s+|solventneho\s+)?klient\w+\s+hladam\w*"
@@ -175,8 +217,7 @@ def validate_entity_and_scope(
         r"|aktualne\s+je\s+nebytov\w+\s+priestor"
         r"|(?:na\s+lv|na\s+liste\s+vlastnictva)\s+(?:je\s+)?veden\w+\s+ako\s+(?:nebytov\w+\s+)?priestor"
         r"|sucastou\s+(?:trojdomu|dvojdomu)"
-        r"|zabudnite\s+na\s+predstavu\s+klasickeho\s+bytu\s+v\s+bytovom\s+dome"
-        r"|limitovana\s+kolekcia\s+\d+\s+rezidencii"
+        r"|(?:rozlozen\w+\s+na|priestor\s+na)\s+(?:troch|3)\s+podlaziach"
         r"|rozdelen\w+\s+na\s+(?:dva|2|tri|3)\s+(?:samostatn\w+\s+)?byty"
         r"|rozdelen\w+\s+na\s+\d\s*-?\s*izbov\w+\s+byt\s+a\s+garson\w*"
         r")\b",
@@ -211,17 +252,20 @@ def validate_entity_and_scope(
     ):
         raise ValueError("Listing is a multi-room row house with total_floors=1")
 
-    # 5. Official Slovak district whitelist & Bratislava location-spoofing guard
+    # 5. Official Slovak district whitelist & Bratislava location-spoofing check (GPS + commuter belt)
     if not city and not district:
         raise ValueError("Listing has neither city nor district in Slovakia")
     if district is not None and district not in SLOVAK_DISTRICTS:
         raise ValueError(f"District is outside the 79 official districts of Slovakia: {district}")
 
-    if (
+    claims_bratislava = bool(
         (district and district.startswith("Bratislava"))
         or (city and city.startswith("Bratislava"))
-    ) and re.search(
-        r"\b(?:v\s+hamuliakove|v\s+dvornikoch|v\s+tt\s+kraji|v\s+trnavskom\s+kraji|okres\s+senec|okres\s+dunajska\s+streda|okres\s+trnava|okres\s+galanta)\b",
-        f"{title_clean} {desc_clean}",
-    ):
-        raise ValueError("Listing spoofs Bratislava location for a property in another district")
+    )
+    if claims_bratislava:
+        if not is_within_bratislava_gps(latitude, longitude):
+            raise ValueError(
+                f"Listing claims Bratislava location but GPS ({latitude}, {longitude}) falls outside Bratislava"
+            )
+        if _BRATISLAVA_EXTERNAL_LOC_RE.search(f"{title_clean} {desc_clean}"):
+            raise ValueError("Listing spoofs Bratislava location for a property in another district")

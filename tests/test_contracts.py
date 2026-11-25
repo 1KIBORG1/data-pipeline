@@ -243,6 +243,7 @@ class TestDistrictAndEntityFiltering(unittest.TestCase):
             "R E N A T A S - Investičná príležitosť v Dominikánskej republike",
             "ZA CENU mini GARSONKY V BRATISLAVE VLASTNÝ RODINNÝ DOMČEK V RAKÚSKU - WOLFSTHAL",
             "PREDAJ GARÁŽE, samostatná garáž v garážovom dome",
+            "Pivničná kobka 3,5 m2 na predaj, Bratislava - Ružinov",
             "63m2 - INDUSTRIÁLNA VODÁRENSKÁ STUDŇA - LESOPARK VRAKUŇA",
             "Nebytový priestor vhodný na bývanie / podnikanie Kramare BA",
             "Predaj moderného 5-izbového rodinného domu v radovej zástavbe v Bernolákove.",
@@ -308,6 +309,11 @@ class TestDistrictAndEntityFiltering(unittest.TestCase):
             "AFYREAL predaj 4izb, top lokalita, loggia, parkovisko a MHD pod domom",
             "Rezidencia Karpatská - DOM D - 3 izbový by D.1A - 1.NP + predzáhradka",
             "4-IZBOVÝ BYT S VEĽKORYSOU LOGGIOU | MOŽNOSŤ 2 BYTOVÝCH JEDNOTIEK",
+            "Štýlový 2-izbový byt 75 m² s balkónom v obľúbenom projekte 500 bytov",
+            "SKOLAUDOVANÉ! - 2-izbový byt C.III.3 s lodžiou, v cene bytu pivničná kobka",
+            "Oáza mestskej elegancie a pokoja v lukratívnom srdci Ružinova",
+            "Bývanie, kde má priestor všetko dôležité | 4-izbový | 81 m² | Piešťany",
+            "3i chyžka s loggiou na Zvončekovej",
         ]
         for title in valid_titles:
             with self.subTest(title=title):
@@ -316,6 +322,7 @@ class TestDistrictAndEntityFiltering(unittest.TestCase):
                     url="https://www.nehnutelnosti.sk/detail/JuValid/x",
                     title=title,
                     category_sub="THREE_ROOM_APARTMENT",
+                    area_sqm=68.0,
                     city="Trnava",
                     district="Trnava",
                 )

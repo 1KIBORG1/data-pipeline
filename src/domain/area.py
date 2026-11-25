@@ -8,6 +8,116 @@ from typing import Any
 from src.domain.reference import normalize_text, parse_positive_float
 from src.domain.sections import split_description_sections
 
+_LABELED_AREA_RE = re.compile(
+    r"""
+    (?:
+        # "výmera bytu je 64 m2", "podlahová plocha: cca 58,5 m²"
+        \b(?:vymera|rozloha|uzitkova\s+plocha|podlahova\s+plocha|celkova\s+vymera)
+        \s+(?:bytu|apartmanu|garsonky|mezonetu)?
+        \s*(?:je|ma|predstavuje|[:=-])?
+        \s*(?:cca\s*|velkorysych\s*|az\s*)?
+        (\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)
+      |
+        # "byt o výmere 62 m²", "apartmán (63 m²)"
+        \b(?:byt|apartman|garsonka|mezonet)
+        \s*(?:ma\s+(?:vymeru|rozlohu)|o\s+vymere|s\s+vymerou|o\s+rozlohe|s\s+rozlohou|s\s+uzitkovou\s+plochou|\()
+        \s*(?:cca\s*)?
+        (\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)
+      |
+        # Short key-value form: "výmera: 52 m2"
+        \b(?:vymera|uzitkova\s+plocha|podlahova\s+plocha)
+        \s*[:=-]\s*(?:cca\s*|velkorysych\s*)?
+        (\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)
+    )
+    """,
+    re.VERBOSE,
+)
+
+_INTERIOR_AREA_RE = re.compile(
+    r"""
+    (?:
+        # "podlahová plocha bytu je 36,10 m²", "čistá výmera: 54 m2"
+        \b(?:podlahova|cista|vnutorna|obytna)\s+(?:plocha|vymera)
+        (?:\s+bytu|\s+apartmanu)?
+        \s*(?:je|predstavuje|ma|[:=-])?\s*
+        (\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)
+      |
+        # "interiér 174 m2", "interiér bytu: 67 m²"
+        \binterier(?:\s+bytu)?\s*(?:je|ma|[:=-])?\s*
+        (\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)
+      |
+        # "82 m2 interiér + 14 m2 exteriér"
+        \b(\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)\s+interier
+        \s*\+\s*(\d{1,3}(?:[.,]\d+)?)\s*(?:m2|m²)\s+exterier
+      |
+        # "samotný byt má výmeru 61 m2"
+        \bsamotn\w+\s+byt\s+(?:je\s+|ma\s+)?(?:o\s+vymere\s+|vymeru\s+)?
+        (\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)
+      |
+        # "z čoho 58 m2 podlahovej plochy" / "z toho je 48 m2 + loggia"
+        \bz\s+(?:coho|toho)\s+(?:vnutorna\s+plocha[^.;\n]{0,45}?je\s+|az\s+|je\s+)?
+        (\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)\s*
+        (?:(?:obytnej|podlahovej|cistej)\s+plochy|\+\s*(?:zasklen\w+\s+)?(?:balkon|loggi|lodzi|teras))
+    )
+    """,
+    re.VERBOSE,
+)
+
+_ADDITIVE_BREAKDOWN_RE = re.compile(
+    r"""
+    # Optional leading area/unit label ("rozloha bytu je", "3i byt o výmere")
+    (?:
+        (?:rozloha|vymera|plocha|up|uzitkova\s+plocha|dispozicia|interier|byt\w*|apartman\w*|garson\w*|mezonet\w*|penthouse)
+        \s*(?:bytu\s*|o\s+rozlohe\s*|o\s+vymere\s*|s\s+vymerou\s*|s\s+prislusenstvom\s*)?
+        (?:je\s+|ma\s+|predstavuje\s+|[:=(-]\s*)?
+    )?
+    # Group 1: interior apartment area (m2)
+    (?<![.,\d])(\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)(?:\s+byt)?
+    # Optional parenthetical cellar note ("vrátane pivnice 1,5 m2")
+    (?:\s*,?\s*\(?\s*vratane\s+pivnice(?:\s+na\s+poschodi)?(?:\s+\d+(?:[.,]\d+)?\s*(?:m2|m²))?\s*\)?)?
+    # Connector ("+", "a", "s", "so", "disponuje", ",")
+    \s*(?:\+|a\s+(?:zasklen\w+\s+)?|,?\s*s\s+(?:zasklen\w+\s+|velk\w+\s+|priestrann\w+\s+)?|,?\s*so\s+(?:zasklen\w+\s+)?|,?\s*disponuje\s+|,\s*(?:plocha\s+)?)
+    # Group 2: optional outdoor area before noun ("3,45 m2 loggia")
+    \s*(?:(\d{1,3}(?:[.,]\d+)?)\s*(?:m2|m²)\s*)?
+    (?:zasklen\w+\s+)?
+    # Group 3: exterior component noun
+    (balkon\w*|bakon\w*|loggi\w*|lodzi\w*|logi\w*|teras\w*|pivnic\w*|predzahrad\w*)
+    # Group 4: optional outdoor area after noun ("loggia o výmere 6,2 m²")
+    (?:\s*(?:o\s+vymere\s*|s\s+vymerou\s*|s\s+rozlohou\s*|ma\s+rozlohu\s*|[:=-]\s*)?(\d{1,3}(?:[.,]\d+)?)\s*(?:m2|m²|m\b))?
+    """,
+    re.VERBOSE,
+)
+
+_SUBTRACTIVE_BREAKDOWN_RE = re.compile(
+    r"""
+    \b(?:celkov\w+\s+)?(?:vymer\w+|rozloh\w+|ploch\w+)(?:\s+bytu)?\s*(?:je\s+)?
+    (\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)\s*(?:,\s*)?(?:z\s+toho|vratane)\s+
+    (?:
+        (?:loggi\w*|lodzi\w*|balkon\w*|teras\w*|pivnic\w*)\s*(?:o\s+vymere\s*|s\s+vymerou\s*)?(\d{1,2}(?:[.,]\d+)?)\s*(?:m2|m²)
+      | (\d{1,2}(?:[.,]\d+)?)\s*(?:m2|m²)\s*(?:loggi\w*|lodzi\w*|balkon\w*|teras\w*|pivnic\w*)
+      | (?:loggi\w*|lodzi\w*|balkon\w*|teras\w*)
+    )
+    """,
+    re.VERBOSE,
+)
+
+_ROOM_CLAUSE_WORDS: tuple[str, ...] = (
+    "izba",
+    "izby",
+    "spaln",
+    "kuchyn",
+    "kupeln",
+    "chodb",
+    "predsien",
+    "obyvac",
+    "detsk",
+    "hal",
+    "pracovn",
+    "satnik",
+    "wc",
+    "toalet",
+)
+
 
 def compute_exact_portal_area(
     raw_area: float | None,
@@ -62,14 +172,7 @@ def extract_area_from_text(
 
     cleaned = normalize_text(text)
 
-    m_labeled = re.search(
-        r"(?:"
-        r"\b(?:vymera|rozloha|uzitkova\s+plocha|podlahova\s+plocha|celkova\s+vymera)\s+(?:bytu|apartmanu|garsonky|mezonetu)?\s*(?:je|ma|predstavuje|[:=-])?\s*(?:cca\s*|velkorysych\s*|az\s*)?(\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)"
-        r"|\b(?:byt|apartman|garsonka|mezonet)\s*(?:ma\s+(?:vymeru|rozlohu)|o\s+vymere|s\s+vymerou|o\s+rozlohe|s\s+rozlohou|s\s+uzitkovou\s+plochou|\()\s*(?:cca\s*)?(\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)"
-        r"|\b(?:vymera|uzitkova\s+plocha|podlahova\s+plocha)\s*[:=-]\s*(?:cca\s*|velkorysych\s*)?(\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)"
-        r")",
-        cleaned,
-    )
+    m_labeled = _LABELED_AREA_RE.search(cleaned)
     if m_labeled:
         raw_num = m_labeled.group(1) or m_labeled.group(2) or m_labeled.group(3)
         val = float(raw_num.replace(",", "."))
@@ -169,17 +272,8 @@ def resolve_pure_apartment_area(
         combined_safe,
     )
 
-    # 1. Explicit "podlahová plocha" / "čistá plocha bytu" / "interiér" / "samotný byt"
-    for m_podl in re.finditer(
-        r"(?:"
-        r"\b(?:podlahova|cista|vnutorna|obytna)\s+(?:plocha|vymera)(?:\s+bytu|\s+apartmanu)?\s*(?:je|predstavuje|ma|[:=-])?\s*(\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)"
-        r"|\binterier(?:\s+bytu)?\s*(?:je|ma|[:=-])?\s*(\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)"
-        r"|\b(\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)\s+interier\s*\+\s*(\d{1,3}(?:[.,]\d+)?)\s*(?:m2|m²)\s+exterier"
-        r"|\bsamotn\w+\s+byt\s+(?:je\s+|ma\s+)?(?:o\s+vymere\s+|vymeru\s+)?(\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)"
-        r"|\bz\s+(?:coho|toho)\s+(?:vnutorna\s+plocha[^.;\n]{0,45}?je\s+|az\s+|je\s+)?(\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)\s*(?:(?:obytnej|podlahovej|cistej)\s+plochy|\+\s*(?:zasklen\w+\s+)?(?:balkon|loggi|lodzi|teras))"
-        r")",
-        combined_safe,
-    ):
+    # 1. Explicit interior / podlahová plocha statement
+    for m_podl in _INTERIOR_AREA_RE.finditer(combined_safe):
         cand_str = (
             m_podl.group(1)
             or m_podl.group(2)
@@ -215,43 +309,15 @@ def resolve_pure_apartment_area(
             ):
                 return round(cand, 2)
 
-    # 2. Explicit additive breakdown: "<A_apt> m2 [byt] +/, [<A_ext> m2] (balkón|loggia|terasa|pivnica|predzáhradka)"
-    room_words = (
-        "izba",
-        "izby",
-        "spaln",
-        "kuchyn",
-        "kupeln",
-        "chodb",
-        "predsien",
-        "obyvac",
-        "detsk",
-        "hal",
-        "pracovn",
-        "satnik",
-        "wc",
-        "toalet",
-    )
-    for m_add in re.finditer(
-        r"(?:"
-        r"(?:rozloha|vymera|plocha|up|uzitkova\s+plocha|dispozicia|interier|byt\w*|apartman\w*|garson\w*|mezonet\w*|penthouse)\s*(?:bytu\s*|o\s+rozlohe\s*|o\s+vymere\s*|s\s+vymerou\s*|s\s+prislusenstvom\s*)?(?:je\s+|ma\s+|predstavuje\s+|[:=(-]\s*)?"
-        r")?"
-        r"(?<![.,\d])(\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)(?:\s+byt)?"
-        r"(?:\s*,?\s*\(?\s*vratane\s+pivnice(?:\s+na\s+poschodi)?(?:\s+\d+(?:[.,]\d+)?\s*(?:m2|m²))?\s*\)?)?"
-        r"\s*(?:\+|a\s+(?:zasklen\w+\s+)?|,?\s*s\s+(?:zasklen\w+\s+|velk\w+\s+|priestrann\w+\s+)?|,?\s*so\s+(?:zasklen\w+\s+)?|,?\s*disponuje\s+|,\s*(?:plocha\s+)?)"
-        r"\s*(?:(\d{1,3}(?:[.,]\d+)?)\s*(?:m2|m²)\s*)?"
-        r"(?:zasklen\w+\s+)?"
-        r"(balkon\w*|bakon\w*|loggi\w*|lodzi\w*|logi\w*|teras\w*|pivnic\w*|predzahrad\w*)"
-        r"(?:\s*(?:o\s+vymere\s*|s\s+vymerou\s*|s\s+rozlohou\s*|ma\s+rozlohu\s*|[:=-]\s*)?(\d{1,3}(?:[.,]\d+)?)\s*(?:m2|m²|m\b))?",
-        combined_safe,
-    ):
+    # 2. Additive breakdown ("64,76 m2 + 3,97 m2 loggia + 0,95 m2 pivnica")
+    for m_add in _ADDITIVE_BREAKDOWN_RE.finditer(combined_safe):
         cand_apt = float(m_add.group(1).replace(",", "."))
         if not (min_area <= cand_apt <= 400.0):
             continue
         prefix_ctx = re.split(r"[\n.;!]", combined_safe[max(0, m_add.start() - 30) : m_add.start()])[
             -1
         ]
-        if any(rw in prefix_ctx for rw in room_words):
+        if any(rw in prefix_ctx for rw in _ROOM_CLAUSE_WORDS):
             continue
 
         ext1 = float(m_add.group(2).replace(",", ".")) if m_add.group(2) else 0.0
@@ -290,14 +356,8 @@ def resolve_pure_apartment_area(
             ):
                 return round(cand_apt, 2)
 
-    # 3. Explicit subtraction: "celková výmera 70.00 m2 z toho loggia 3.78 m2"
-    m_sub = re.search(
-        r"\b(?:celkov\w+\s+)?(?:vymer\w+|rozloh\w+|ploch\w+)(?:\s+bytu)?\s*(?:je\s+)?(\d{2,3}(?:[.,]\d+)?)\s*(?:m2|m²)\s*(?:,\s*)?(?:z\s+toho|vratane)\s+"
-        r"(?:(?:loggi\w*|lodzi\w*|balkon\w*|teras\w*|pivnic\w*)\s*(?:o\s+vymere\s*|s\s+vymerou\s*)?(\d{1,2}(?:[.,]\d+)?)\s*(?:m2|m²)"
-        r"|(\d{1,2}(?:[.,]\d+)?)\s*(?:m2|m²)\s*(?:loggi\w*|lodzi\w*|balkon\w*|teras\w*|pivnic\w*)"
-        r"|(?:loggi\w*|lodzi\w*|balkon\w*|teras\w*))",
-        combined_safe,
-    )
+    # 3. Subtractive breakdown ("celková výmera 70,00 m2 z toho loggia 3,78 m2")
+    m_sub = _SUBTRACTIVE_BREAKDOWN_RE.search(combined_safe)
     if m_sub:
         gross = float(m_sub.group(1).replace(",", "."))
         sub_str = m_sub.group(2) or m_sub.group(3)
